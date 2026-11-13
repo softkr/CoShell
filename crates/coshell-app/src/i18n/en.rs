@@ -187,7 +187,7 @@ pub fn en(s: &str) -> Option<&'static str> {
         "릴리스를 찾을 수 없습니다 (저장소가 비공개이거나 릴리스가 없음)" => "No release found (the repository is private or has no releases)",
         "업데이트 서버 응답 {0}" => "Update server answered {0}",
         "이 릴리스에는 설치 파일(.dmg)이 없습니다" => "This release has no installer (.dmg)",
-        "릴리스 노트에 SHA-256이 없어 설치하지 않았습니다" => "Not installed: the release notes have no SHA-256",
+        "릴리스에 SHA-256이 없어 설치하지 않았습니다" => "Not installed: the release has no SHA-256",
         "내려받은 파일의 SHA-256이 릴리스 노트와 다릅니다. 설치하지 않았습니다." => "The download's SHA-256 does not match the release notes. Not installed.",
         "앱을 바꾸지 못했습니다 ({0}): {1}" => "Could not replace the app ({0}): {1}",
         "업데이트 자동 확인 (10분마다)" => "Check for updates automatically (every 10 minutes)",

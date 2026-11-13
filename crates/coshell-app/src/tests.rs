@@ -1687,6 +1687,7 @@ fn new_release_is_offered_in_the_status_bar() {
         page: "https://github.com/softkr/CoShell/releases/tag/v9.0.0".into(),
         dmg: Some("https://example.com/CoShell-9.0.0.dmg".into()),
         sha256: Some("0".repeat(64)),
+        sha256_url: None,
     };
     let _ = app.update(Message::UpdateChecked(Ok(Some(rel.clone()))));
     assert!(app.notice.as_deref().is_some_and(|n| n.contains("9.0.0")));
