@@ -27,6 +27,8 @@ pub struct Release {
     pub dmg: Option<String>,
     /// `SHA-256 (`….dmg`): `…`` line of the notes.
     pub sha256: Option<String>,
+    /// `….dmg.sha256` asset (`<hash>  <file>`), used when the notes have no hash.
+    pub sha256_url: Option<String>,
 }
 
 fn parts(v: &str) -> Option<(u64, u64, u64)> {
@@ -57,7 +59,16 @@ pub fn parse_latest(v: &Value, current: &str) -> Option<Release> {
     }
     let asset = v["assets"].as_array().into_iter().flatten().find(|a| a["name"].as_str().is_some_and(|n| n.ends_with(".dmg")));
     let name = asset.and_then(|a| a["name"].as_str()).unwrap_or_default();
+    let hash_file = format!("{name}.sha256");
+    let sha256_url = v["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| !name.is_empty() && a["name"].as_str() == Some(hash_file.as_str()))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .map(String::from);
     Some(Release {
+        sha256_url,
         page: v["html_url"].as_str().unwrap_or_default().to_string(),
         dmg: asset.and_then(|a| a["browser_download_url"].as_str()).map(String::from),
         sha256: notes_sha256(v["body"].as_str().unwrap_or_default(), name),
@@ -103,10 +114,33 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The hash in a `sha256sum`/`shasum` style file.
+fn parse_hash_file(text: &str) -> Option<String> {
+    let h = text.split_whitespace().next()?;
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| h.to_ascii_lowercase())
+}
+
+async fn hash_file(url: &str) -> Result<String, String> {
+    let text = client(TIMEOUT)?
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| e.without_url().to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_hash_file(&text).ok_or_else(|| tr("릴리스에 SHA-256이 없어 설치하지 않았습니다").into())
+}
+
 /// Download, verify and put the new bundle in place of `target`. Returns the bundle to relaunch.
 pub async fn install(release: Release, target: PathBuf) -> Result<PathBuf, String> {
     let url = release.dmg.ok_or_else(|| tr("이 릴리스에는 설치 파일(.dmg)이 없습니다").to_string())?;
-    let want = release.sha256.ok_or_else(|| tr("릴리스 노트에 SHA-256이 없어 설치하지 않았습니다").to_string())?;
+    let want = match (release.sha256, release.sha256_url) {
+        (Some(h), _) => h,
+        (None, Some(u)) => hash_file(&u).await?,
+        (None, None) => return Err(tr("릴리스에 SHA-256이 없어 설치하지 않았습니다").into()),
+    };
     let bytes = client(DOWNLOAD_TIMEOUT)?
         .get(&url)
         .send()
@@ -190,6 +224,20 @@ mod tests {
         assert_eq!(r.dmg.as_deref(), Some("https://example.com/CoShell-0.4.0.dmg"));
         assert_eq!(r.sha256.as_deref(), Some(hash));
         assert_eq!(parse_latest(&v, "0.4.0"), None, "same version");
+        // Built by CI: the hash comes as a `.sha256` file next to the DMG.
+        let ci = serde_json::json!({
+            "tag_name": "v0.5.0", "html_url": "", "body": "",
+            "assets": [
+                {"name": "CoShell-0.5.0-windows-x86_64.zip", "browser_download_url": "https://example.com/w.zip"},
+                {"name": "CoShell-0.5.0-macos-arm64.dmg", "browser_download_url": "https://example.com/m.dmg"},
+                {"name": "CoShell-0.5.0-macos-arm64.dmg.sha256", "browser_download_url": "https://example.com/m.dmg.sha256"},
+            ],
+        });
+        let r = parse_latest(&ci, "0.4.1").unwrap();
+        assert_eq!((r.dmg.as_deref(), r.sha256.as_deref()), (Some("https://example.com/m.dmg"), None));
+        assert_eq!(r.sha256_url.as_deref(), Some("https://example.com/m.dmg.sha256"));
+        assert_eq!(parse_hash_file(&format!("{hash}  CoShell-0.5.0-macos-arm64.dmg\n")).as_deref(), Some(hash));
+        assert_eq!(parse_hash_file("not a hash"), None);
         let mut pre = v.clone();
         pre["prerelease"] = true.into();
         assert_eq!(parse_latest(&pre, "0.3.0"), None, "pre-releases are not offered");

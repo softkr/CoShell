@@ -1,5 +1,5 @@
-# Windows and Linux builds. The macOS (Apple Silicon) DMG is built and signed locally
-# with scripts/bundle-macos.sh and scripts/package-dmg.sh.
+# Release builds: macOS (Apple Silicon only, DMG), Windows (x64, zip), Linux (x86_64, tar.gz).
+# Every archive gets a `.sha256` file next to it; the app's updater checks the DMG against it.
 #
 # - Pull requests: build only, so a change that breaks Windows or Linux shows up before merging.
 # - Publishing a release: build and attach the archives (and their SHA-256) to it.
@@ -30,6 +30,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: macos-arm64
+            os: macos-14
           - name: windows-x86_64
             os: windows-latest
           - name: linux-x86_64
@@ -55,8 +57,29 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
 
+      - name: Tag matches the crate version
+        if: env.TAG != ''
+        shell: bash
+        run: |
+          v="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "v$v" = "$TAG" ] || { echo "tag $TAG but Cargo.toml says $v" >&2; exit 1; }
+
       - name: Build
+        if: runner.os != 'macOS'
         run: cargo build --release --locked -p coshell-app
+
+      - name: Build app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/bundle-macos.sh
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS' && env.TAG != ''
+        run: |
+          dmg="$(scripts/package-dmg.sh | tail -1)"
+          name="$(basename "$dmg")"
+          cp "$dmg" "$name"
+          shasum -a 256 "$name" > "$name.sha256"
+          echo "ASSETS=$name $name.sha256" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: runner.os == 'Windows' && env.TAG != ''
