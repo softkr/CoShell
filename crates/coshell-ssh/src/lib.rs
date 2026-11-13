@@ -110,7 +110,7 @@ impl ConnectOptions {
     }
 
     pub fn default_known_hosts() -> Option<PathBuf> {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh").join("known_hosts"))
+        std::env::home_dir().map(|h| h.join(".ssh").join("known_hosts"))
     }
 }
 

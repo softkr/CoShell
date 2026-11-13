@@ -6,7 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/target/release/bundle/CoShell.app"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
-DMG="$ROOT/target/release/bundle/CoShell-${VERSION}.dmg"
+# Apple Silicon only; the name says so next to the Windows and Linux downloads.
+DMG="$ROOT/target/release/bundle/CoShell-${VERSION}-macos-arm64.dmg"
 
 [[ -d "$APP" ]] || { echo "missing $APP — run scripts/bundle-macos.sh first" >&2; exit 1; }
 

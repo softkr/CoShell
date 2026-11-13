@@ -1,0 +1,93 @@
+# Windows and Linux builds. The macOS (Apple Silicon) DMG is built and signed locally
+# with scripts/bundle-macos.sh and scripts/package-dmg.sh.
+#
+# - Pull requests: build only, so a change that breaks Windows or Linux shows up before merging.
+# - Publishing a release: build and attach the archives (and their SHA-256) to it.
+# - Manual run: rebuild and re-attach for an existing release tag.
+name: Release builds
+
+on:
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and attach to (e.g. v0.4.1)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+          - name: linux-x86_64
+            os: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libxkbcommon-dev
+
+      - name: NASM (aws-lc on Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build
+        run: cargo build --release --locked -p coshell-app
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows' && env.TAG != ''
+        shell: pwsh
+        run: |
+          $v = "$env:TAG".TrimStart('v')
+          $name = "CoShell-$v-windows-x86_64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item target/release/coshell.exe "$name/CoShell.exe"
+          Copy-Item README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          "ASSETS=$name.zip $name.zip.sha256" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux' && env.TAG != ''
+        run: |
+          v="${TAG#v}"
+          name="CoShell-$v-linux-x86_64"
+          mkdir -p "$name"
+          cp target/release/coshell "$name/"
+          cp packaging/linux/coshell.desktop "$name/"
+          cp crates/coshell-app/assets/png/coshell-256.png "$name/coshell.png"
+          cp README.md LICENSE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "ASSETS=$name.tar.gz $name.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Attach to the release
+        if: env.TAG != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" $ASSETS --clobber

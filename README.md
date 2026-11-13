@@ -11,7 +11,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-2024-orange)
-![macOS](https://img.shields.io/badge/macOS-앱%20번들%20·%20DMG-lightgrey)
+![Platforms](https://img.shields.io/badge/macOS%20(Apple%20Silicon)%20·%20Windows%20·%20Linux-lightgrey)
 
 </div>
 
@@ -110,6 +110,20 @@ API 키는 설정 파일이 아니라 OS 키체인에 저장됩니다.
 
 ## 시작하기
 
+### 내려받기
+
+[Releases](https://github.com/softkr/CoShell/releases)에서 운영체제에 맞는 파일을 받습니다.
+
+| 운영체제 | 파일 | 설치 |
+|---|---|---|
+| macOS (Apple Silicon) | `CoShell-<버전>-macos-arm64.dmg` | 열어서 CoShell을 응용 프로그램 폴더로 옮김 |
+| Windows (x64) | `CoShell-<버전>-windows-x86_64.zip` | 압축을 풀고 `CoShell.exe` 실행 (Windows 10 1809 이상) |
+| Linux (x86_64) | `CoShell-<버전>-linux-x86_64.tar.gz` | 압축을 풀고 `coshell` 실행. `coshell.desktop`·`coshell.png`로 메뉴에 등록 가능 |
+
+Intel Mac용 빌드는 없습니다. 아직 Apple·Microsoft 서명이 없어서 처음 실행할 때 운영체제가 확인을 요청할 수 있습니다.
+
+### 소스로 빌드
+
 Rust(edition 2024)가 필요합니다.
 
 ```bash
@@ -123,7 +137,7 @@ cargo run -p coshell-app --release -- ssh my-host   # 등록한 서버나 ~/.ssh
 
 ```bash
 scripts/bundle-macos.sh    # target/release/bundle/CoShell.app (기본은 로컬용 ad-hoc 서명)
-scripts/package-dmg.sh     # CoShell-<버전>.dmg
+scripts/package-dmg.sh     # CoShell-<버전>-macos-arm64.dmg
 ```
 
 배포용은 `COSHELL_SIGN_IDENTITY`를 지정해 번들을 만든 뒤 `scripts/notarize-macos.sh`로 공증합니다.
@@ -134,6 +148,7 @@ scripts/package-dmg.sh     # CoShell-<버전>.dmg
 앱을 켤 때와 10분마다 새 릴리스가 있는지 확인합니다. 새 버전이 있으면 상태바에 `⬆ 0.x.x 업데이트`가 나타나고,
 누르면 DMG를 내려받아 **릴리스 노트의 SHA-256과 대조한 뒤** 앱을 바꾸고 다시 시작합니다.
 해시가 맞지 않거나 릴리스 노트에 해시가 없으면 설치하지 않습니다.
+Windows·Linux에서는 업데이트 버튼이 릴리스 페이지를 열어 줍니다.
 
 ### AI 연결 (1분)
 
@@ -143,7 +158,9 @@ scripts/package-dmg.sh     # CoShell-<버전>.dmg
 
 Ollama처럼 내 컴퓨터에서 돌리는 모델은 키 없이 쓸 수 있습니다.
 
-## 단축키 (macOS)
+## 단축키
+
+macOS 기준입니다. Windows·Linux에서는 ⌘ 대신 Ctrl을 누릅니다.
 
 | 키 | 동작 |
 |---|---|

@@ -151,8 +151,8 @@ async fn auto(
     }
     let candidates: Vec<PathBuf> = match identity {
         Some(p) => vec![p.to_path_buf()],
-        None => std::env::var_os("HOME")
-            .map(|h| DEFAULT_IDENTITIES.iter().map(|n| PathBuf::from(&h).join(".ssh").join(n)).filter(|p| p.exists()).collect())
+        None => std::env::home_dir()
+            .map(|h| DEFAULT_IDENTITIES.iter().map(|n| h.join(".ssh").join(n)).filter(|p| p.exists()).collect())
             .unwrap_or_default(),
     };
     for path in candidates {

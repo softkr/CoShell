@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CoShell
+Comment=SSH terminal with an AI that works alongside you
+Exec=coshell
+Icon=coshell
+Terminal=false
+Categories=System;TerminalEmulator;Network;
