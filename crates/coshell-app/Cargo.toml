@@ -1,0 +1,30 @@
+[package]
+name = "coshell-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coshell"
+path = "src/main.rs"
+
+[dependencies]
+coshell-term = { path = "../coshell-term" }
+coshell-ssh = { path = "../coshell-ssh" }
+coshell-ai = { path = "../coshell-ai" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1.2.1"
+iced.workspace = true
+unicode-width.workspace = true
+zeroize.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+sys-locale = "0.3.2"
+
+[dev-dependencies]
+iced_test = "=0.14.0"
+tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.17", default-features = false }

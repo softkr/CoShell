@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+<linearGradient id="outer" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#34477a"/><stop offset="1" stop-color="#25355d"/>
+</linearGradient>
+<linearGradient id="frame" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#36497c"/><stop offset="1" stop-color="#2b3c69"/>
+</linearGradient>
+<linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#3a4e84"/><stop offset="1" stop-color="#31446f"/>
+</linearGradient>
+<linearGradient id="content" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0" stop-color="#121c35"/><stop offset="1" stop-color="#0f172c"/>
+</linearGradient>
+<linearGradient id="glyph" x1="0" y1="0" x2="1" y2="1">
+  <stop offset="0" stop-color="#4fb3ff"/><stop offset="1" stop-color="#2f8dff"/>
+</linearGradient>
+<radialGradient id="spark" cx="0.45" cy="0.42" r="0.6">
+  <stop offset="0" stop-color="#8fd2ff"/><stop offset="0.55" stop-color="#4aaeff"/><stop offset="1" stop-color="#2d8bff"/>
+</radialGradient>
+<filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+  <feGaussianBlur stdDeviation="15.10" result="b"/>
+  <feColorMatrix in="b" type="matrix" values="0 0 0 0 0.20  0 0 0 0 0.60  0 0 0 0 1  0 0 0 0.9 0" result="c"/>
+  <feMerge><feMergeNode in="c"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>
+<filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+  <feGaussianBlur in="SourceAlpha" stdDeviation="16"/><feOffset dy="14" result="o"/>
+  <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+</filter>
+</defs>
+<rect x="40" y="40" width="944" height="944" rx="202.96" fill="url(#outer)"/>
+<rect x="70.21" y="70.21" width="883.58" height="883.58" rx="172.75" fill="#17223f"/>
+<rect x="100.42" y="100.42" width="823.17" height="829.78" rx="161.42" fill="url(#frame)"/>
+<path d="M100.42,256.18 V261.84 A161.42,161.42 0 0 1 261.84,100.42 H762.16 A161.42,161.42 0 0 1 923.58,261.84 V256.18 Z" fill="url(#bar)"/>
+<path d="M124.02,256.18 H899.98 V764.05 A137.82,137.82 0 0 1 762.16,901.87 H261.84 A137.82,137.82 0 0 1 124.02,764.05 Z" fill="url(#content)"/>
+<circle cx="194.82" cy="178.30" r="24.54" fill="#ff5f57"/>
+<circle cx="276.00" cy="178.30" r="24.54" fill="#febc2e"/>
+<circle cx="360.02" cy="178.30" r="24.54" fill="#28c840"/>
+<g filter="url(#glow)">
+<polyline points="242.02,444.98 350.58,545.98 242.02,646.99" fill="none" stroke="url(#glyph)" stroke-width="40.59" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="388.34" y1="643.22" x2="484.62" y2="643.22" stroke="#3fa7ff" stroke-width="34.93" stroke-linecap="round"/>
+<circle cx="408.16" cy="545.98" r="12.74" fill="#4aaeff"/>
+<circle cx="458.19" cy="545.98" r="12.74" fill="#4aaeff"/>
+<circle cx="508.22" cy="545.98" r="12.74" fill="#4aaeff"/>
+<circle cx="557.31" cy="545.98" r="12.74" fill="#4aaeff"/>
+<circle cx="606.40" cy="545.98" r="12.74" fill="#4aaeff"/>
+<path d="M720.62,465.74 Q736.67,529.94 800.86,545.98 Q736.67,562.03 720.62,626.22 Q704.58,562.03 640.38,545.98 Q704.58,529.94 720.62,465.74 Z" fill="url(#spark)"/>
+<path d="M784.82,447.81 Q791.61,475.00 818.80,481.79 Q791.61,488.59 784.82,515.78 Q778.02,488.59 750.83,481.79 Q778.02,475.00 784.82,447.81 Z" fill="url(#spark)"/>
+</g>
+</svg>

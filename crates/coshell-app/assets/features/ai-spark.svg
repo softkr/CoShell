@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<defs>
+<linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ab4ff"/><stop offset="1" stop-color="#2f86f6"/></linearGradient>
+<linearGradient id="o" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffa04d"/><stop offset="1" stop-color="#ff7a2f"/></linearGradient>
+</defs>
+<path d="M10.5,5.0 Q12.2,11.8 19.0,13.5 Q12.2,15.2 10.5,22.0 Q8.8,15.2 2.0,13.5 Q8.8,11.8 10.5,5.0Z" fill="url(#o)"/>
+<path d="M19.3,1.5 Q19.96,4.14 22.6,4.8 Q19.96,5.46 19.3,8.1 Q18.64,5.46 16.0,4.8 Q18.64,4.14 19.3,1.5Z" fill="url(#o)"/>
+</svg>

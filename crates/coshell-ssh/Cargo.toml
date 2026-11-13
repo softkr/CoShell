@@ -1,0 +1,15 @@
+[package]
+name = "coshell-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SSH jump-chain transport (russh) for CoShell terminal sessions"
+
+[dependencies]
+coshell-term = { path = "../coshell-term" }
+russh.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
