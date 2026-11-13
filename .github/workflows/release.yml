@@ -31,7 +31,7 @@ jobs:
       matrix:
         include:
           - name: macos-arm64
-            os: macos-14
+            os: macos-latest # Apple Silicon
           - name: windows-x86_64
             os: windows-latest
           - name: linux-x86_64
