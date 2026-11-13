@@ -176,7 +176,7 @@ async fn interactive_auth_prompts_for_password() {
 
 /// Auto auth with a saved password; no agent/key can match (bogus identity).
 fn auto_spec(user: (&str, &str), port: u16, saved: &str) -> HostSpec {
-    let auth = Auth::Auto { identity: Some("/nonexistent/key".into()), password: Some(Zeroizing::new(saved.into())) };
+    let auth = Auth::Auto { identity: Some("/nonexistent/key".into()), password: Some(Zeroizing::new(saved.into())), passphrase: None };
     HostSpec { auth, ..hop(user, port) }
 }
 

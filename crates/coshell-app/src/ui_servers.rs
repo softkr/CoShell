@@ -134,7 +134,7 @@ pub fn page(app: &CoShell) -> El<'_> {
             container(
                 column![
                     text(if total == 0 { tr("저장된 서버가 없습니다") } else { tr("검색 결과가 없습니다") }).size(14),
-                    muted(tr("‘+ 새 서버’를 눌러 추가하세요. ssh 명령을 붙여넣으면 접속 정보가 자동으로 채워집니다.")),
+                    muted(tr("‘+ 새 서버’를 눌러 추가하세요.")),
                 ]
                 .spacing(6)
                 .align_x(Alignment::Center),
@@ -163,4 +163,60 @@ pub fn page(app: &CoShell) -> El<'_> {
         .height(Length::Fill)
         .style(|_| container::Style { background: Some(Background::Color(theme::BG_0)), ..Default::default() })
         .into()
+}
+
+/// The Servers page of the settings dialog: add, edit and delete (delete is in the editor).
+pub fn manage(app: &CoShell) -> El<'_> {
+    let header = row![
+        text_input(tr("이름, 주소, 그룹 검색"), &app.host_filter)
+            .on_input(Message::HostFilter)
+            .size(12.5)
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(input_style),
+        btn(tr("+ 새 서버"), Btn::Primary, Some(Message::HostNewIn(None))),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+
+    let groups = cards(app);
+    let mut list = column![].spacing(14);
+    if groups.is_empty() {
+        list = list.push(
+            container(muted(if app.hosts.is_empty() { tr("저장된 서버가 없습니다") } else { tr("검색 결과가 없습니다") }))
+                .center_x(Length::Fill)
+                .padding(30),
+        );
+    }
+    for (group, cards) in groups {
+        let mut rows = column![row![text(tr(&group).to_string()).size(11.5).color(theme::TEXT_3), muted(format!("{}", cards.len()))].spacing(6)]
+            .spacing(6);
+        for c in cards {
+            let mut line = row![
+                text(c.title).size(12.5).color(theme::TEXT),
+                env_tag(c.env),
+                mono(c.command, 11.0, theme::TEXT_3),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            if let Some(v) = c.via {
+                line = line.push(text(format!("via {v}")).size(11).color(theme::TEXT_3));
+            }
+            line = line.push(Space::new().width(Length::Fill)).push(text(tr("편집")).size(11.5).color(theme::TEXT_2));
+            rows = rows.push(
+                button(line)
+                    .width(Length::Fill)
+                    .padding([7, 10])
+                    .on_press(Message::HostEdit(c.alias))
+                    .style(|_, status| button::Style {
+                        background: Some(Background::Color(if matches!(status, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
+                        text_color: theme::TEXT,
+                        border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_CONTROL.into() },
+                        ..Default::default()
+                    }),
+            );
+        }
+        list = list.push(rows);
+    }
+    column![header, scrollable(container(list).padding(Padding::ZERO.right(12.0))).height(Length::Fill)].spacing(12).height(Length::Fill).into()
 }

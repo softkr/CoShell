@@ -1,7 +1,7 @@
 //! Application state and update logic (tabs, palette, connection prompts).
 
 use crate::i18n::{tf, tr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +16,11 @@ use iced::keyboard::{self, key::Named};
 use iced::{Event, Subscription, Task, event, window};
 use zeroize::Zeroizing;
 
-use crate::ai::{AI_INPUT, Ai, Attachment, Chat};
+use crate::ai::{AI_INPUT, Ai, Attachment, Chat, Exec, ExecState, Turn};
 use crate::settings::{self, CursorKind, Scheme, Settings};
 use crate::assist;
 use crate::conn::{self, Answers, ConnEvent, Once};
-use crate::hosts::{Env, HostDef, HostStore, parse_ssh_command, slugify};
+use crate::hosts::{Env, HostDef, HostStore, slugify};
 use coshell_ai::{AiError, Format, Keychain, Role, SecretStore, StreamEvent};
 use iced::widget::text_editor;
 use crate::launch::Launch;
@@ -38,6 +38,14 @@ const TAB_NAME_MAX_CHARS: usize = 40;
 const NOTICE_TTL: Duration = Duration::from_secs(10);
 /// Terminal width kept when the AI panel is dragged wider.
 const TERMINAL_MIN_W: f32 = 320.0;
+/// Commands the assistant may run in a row before the user speaks again.
+const AGENT_MAX_STEPS: usize = 4;
+/// The assistant stops waiting for a command after this (the command itself keeps running).
+const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How often the terminal is checked while a command runs.
+const AGENT_POLL: std::time::Duration = std::time::Duration::from_millis(150);
+/// Terminal rows searched for the command and its output.
+const AGENT_WATCH_ROWS: usize = 600;
 /// Remembered state (window size, zoom, panel) is written this long after it last changed.
 const PERSIST_DELAY: Duration = Duration::from_secs(2);
 pub fn prompt_input_id(i: usize) -> String {
@@ -216,10 +224,45 @@ pub struct Palette {
 
 /// Settings dialog (⌘,): an edited copy, applied on save.
 pub struct SettingsDraft {
+    pub tab: SettingsTab,
     pub s: Settings,
     pub scrollback: String,
     pub attach_lines: String,
     pub error: Option<String>,
+}
+
+/// Pages of the settings dialog.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Servers,
+    Keys,
+    Ai,
+}
+
+/// "Import key" dialog.
+pub struct KeyImport {
+    pub name: String,
+    pub private: text_editor::Content,
+    /// What the pasted / loaded text is (`None` while empty).
+    pub info: Option<Result<coshell_ssh::keys::KeyInfo, String>>,
+    pub passphrase: Zeroizing<String>,
+    pub note: String,
+    pub error: Option<String>,
+}
+
+impl Default for KeyImport {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            private: text_editor::Content::new(),
+            info: None,
+            passphrase: Zeroizing::default(),
+            note: String::new(),
+            error: None,
+        }
+    }
 }
 
 fn cursor_shape(kind: CursorKind) -> coshell_term::alacritty_terminal::vte::ansi::CursorShape {
@@ -259,6 +302,13 @@ pub struct CoShell {
     pub term_focus: (u64, bool),
     pub tunnel_panel: bool,
     pub tunnel_form: TunnelForm,
+    /// Keys offered in the server editor and the settings' SSH keys page.
+    pub keys: Vec<crate::keys::SshKey>,
+    pub key_import: Option<KeyImport>,
+    /// An input method is composing text (placeholders of multi-line editors step aside).
+    pub composing: bool,
+    /// Imported key waiting for a second click on Delete.
+    pub key_delete: Option<PathBuf>,
     tunnel_seq: u64,
     pub host_store: HostStore,
     hosts_path: Option<PathBuf>,
@@ -299,9 +349,9 @@ pub struct HostEditor {
     /// Settings shown read-only when the host comes from ~/.ssh/config.
     pub external: Option<HostEntry>,
     pub port: String,
-    pub forward_input: String,
+    /// Auto-tunnel being put together (same form as the tunnel popover).
+    pub tunnel: TunnelForm,
     /// "ssh -p 41 root@host" pasted by the user.
-    pub quick: String,
     /// Jump host / key file / tunnels section expanded.
     pub advanced: bool,
     pub error: Option<String>,
@@ -319,7 +369,6 @@ pub struct HostEditor {
 pub enum HostField {
     Name,
     Group,
-    Quick,
     Alias,
     HostName,
     User,
@@ -376,6 +425,21 @@ pub enum Message {
     PromptCancel(TabId),
     Shortcut(Shortcut),
     SettingsOpen,
+    SettingsTab(SettingsTab),
+    KeyImportOpen,
+    Composing(bool),
+    KeyImportClose,
+    KeyImportName(String),
+    KeyImportPrivate(text_editor::Action),
+    KeyImportBrowse,
+    /// (file name, contents) of the picked file.
+    KeyImportLoaded(Option<(String, String)>),
+    KeyImportPassphrase(String),
+    KeyImportNote(String),
+    KeyImportSave,
+    KeyCopyPublic(String),
+    KeyDeleteAsk(PathBuf),
+    KeyDelete(PathBuf),
     SettingsClose,
     SettingsSave,
     SettingsLanguage(settings::Language),
@@ -411,15 +475,12 @@ pub enum Message {
     HostView,
     HostConnect(String),
     HostNewIn(Option<String>),
-    HostQuickApply,
     HostAdvanced,
     HostGroupPick(String),
     HostFilter(String),
     HostEditorClose,
     HostField(HostField, String),
     HostEnv(Env),
-    HostForwardInput(String),
-    HostForwardAdd,
     HostForwardRemove(usize),
     HostSave(bool),
     HostDelete,
@@ -438,9 +499,17 @@ pub enum Message {
     AiRetry(TabId),
     AiSuggest(TabId, String, bool),
     AiCopy(String),
-    AiInsert(TabId, String),
+    /// Type the command and press Enter (risky ones need a second click).
+    AiRun(TabId, String),
+    /// Switch between running read-only commands automatically and only on ▶.
+    AiAutoRun,
+    /// A command the assistant ran in the background finished.
+    AgentDone(TabId, Result<ScreenRun, String>),
+    /// Production: the user lets a command result go to the model.
+    AgentSend(TabId),
+    /// Show / hide a command's output in the chat (tab, turn index).
+    AgentToggle(TabId, usize),
     AiSettingsOpen,
-    AiSettingsClose,
     AiSettingsSelect(usize),
     AiSettingsName(String),
     AiSettingsFormat(Format),
@@ -454,7 +523,22 @@ pub enum Message {
     AiSettingsAdd,
     AiSettingsRemove,
     AiSettingsUse,
-    AiSettingsSave,
+    AiSettingsAdvanced,
+    AiSettingsAdv(AdvField, String),
+    AiSettingsAuth(coshell_ai::AuthStyle),
+    AiSettingsHeaders(text_editor::Action),
+    AiSettingsExtra(text_editor::Action),
+}
+
+/// Text fields of a profile's advanced section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvField {
+    ChatPath,
+    ModelsPath,
+    AuthHeader,
+    AnthropicVersion,
+    MaxTokens,
+    Temperature,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -562,6 +646,10 @@ impl CoShell {
             term_focus: (0, true),
             tunnel_panel: false,
             tunnel_form: TunnelForm::default(),
+            keys: Vec::new(),
+            key_import: None,
+            composing: false,
+            key_delete: None,
             tunnel_seq: 0,
             host_store,
             hosts_path,
@@ -757,18 +845,132 @@ impl CoShell {
         }
     }
 
-    fn open_settings(&mut self) {
+    fn open_settings(&mut self, tab: SettingsTab) {
         self.palette = None;
+        self.ai.settings = None;
         self.settings_draft = Some(SettingsDraft {
+            tab: SettingsTab::General,
             s: self.settings.clone(),
             scrollback: self.settings.scrollback.to_string(),
             attach_lines: self.settings.ai_attach_lines.to_string(),
             error: None,
         });
+        self.settings_tab(tab);
+    }
+
+    /// The AI page edits its own draft; it is loaded the first time the page is shown.
+    fn settings_tab(&mut self, tab: SettingsTab) {
+        let Some(d) = &mut self.settings_draft else { return };
+        d.tab = tab;
+        if tab == SettingsTab::Keys {
+            self.refresh_keys();
+        }
+        if tab == SettingsTab::Ai && self.ai.settings.is_none() {
+            self.ai.open_settings();
+        }
+    }
+
+    fn close_settings(&mut self) {
+        self.settings_draft = None;
+        self.ai.settings = None;
+        self.key_import = None;
+        self.key_delete = None;
+    }
+
+    /// Imported keys live next to hosts.toml.
+    fn keys_dir(&self) -> Option<PathBuf> {
+        self.hosts_path.as_deref().and_then(Path::parent).map(|d| d.join("keys"))
+    }
+
+    pub(crate) fn refresh_keys(&mut self) {
+        self.keys = crate::keys::discover(&self.home, self.keys_dir().as_deref());
+    }
+
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
+    }
+
+    fn update_key_import(&mut self, m: Message) -> Task<Message> {
+        let Some(k) = &mut self.key_import else { return Task::none() };
+        k.error = None;
+        match m {
+            Message::KeyImportName(v) => k.name = v,
+            Message::KeyImportPassphrase(v) => k.passphrase = Zeroizing::new(v),
+            Message::KeyImportNote(v) => k.note = v,
+            Message::KeyImportPrivate(a) => {
+                k.private.perform(a);
+                let text = k.private.text();
+                k.info = (!text.trim().is_empty()).then(|| coshell_ssh::keys::inspect(&text));
+            }
+            Message::KeyImportBrowse => {
+                let start = self.home.join(".ssh");
+                return Task::perform(
+                    async move {
+                        let f = rfd::AsyncFileDialog::new().set_directory(start).pick_file().await?;
+                        let text = std::fs::read_to_string(f.path()).ok()?;
+                        Some((f.file_name(), text))
+                    },
+                    Message::KeyImportLoaded,
+                );
+            }
+            Message::KeyImportLoaded(Some((file, text))) => {
+                if k.name.trim().is_empty() {
+                    k.name = file;
+                }
+                k.private = text_editor::Content::with_text(text.trim());
+                k.info = Some(coshell_ssh::keys::inspect(&text));
+            }
+            Message::KeyImportSave => self.save_key_import(),
+            _ => {}
+        }
+        Task::none()
+    }
+
+    fn save_key_import(&mut self) {
+        let dir = self.keys_dir();
+        let Some(k) = &mut self.key_import else { return };
+        let text = k.private.text();
+        let info = match coshell_ssh::keys::inspect(&text) {
+            Ok(i) => i,
+            Err(e) => {
+                k.error = Some(e);
+                return;
+            }
+        };
+        if !k.passphrase.is_empty()
+            && let Err(e) = coshell_ssh::keys::check_passphrase(&text, &k.passphrase)
+        {
+            k.error = Some(e);
+            return;
+        }
+        let Some(dir) = dir else {
+            k.error = Some(tr("HOME 폴더를 찾을 수 없어 키를 저장하지 못했습니다").into());
+            return;
+        };
+        let path = match crate::keys::save(&dir, &k.name, &text, info.public.as_deref(), &k.note) {
+            Ok(p) => p,
+            Err(e) => {
+                k.error = Some(e);
+                return;
+            }
+        };
+        if !k.passphrase.is_empty()
+            && let Err(e) = self.passwords.set(&conn::passphrase_key(&path), &k.passphrase)
+        {
+            self.notice = Some(tf("키 암호를 키체인에 저장하지 못했습니다: {0}", &[&e]));
+        }
+        self.key_import = None;
+        self.refresh_keys();
     }
 
     fn save_settings(&mut self) {
+        let ai_check = self.ai.check_settings();
         let Some(d) = &mut self.settings_draft else { return };
+        if let Err(e) = ai_check {
+            d.error = Some(e);
+            d.tab = SettingsTab::Ai;
+            return;
+        }
         let parsed = number_in(tr("스크롤백 줄 수"), &d.scrollback, settings::SCROLLBACK_MIN, settings::SCROLLBACK_MAX).and_then(|sb| {
             number_in(tr("AI 첨부 줄 수"), &d.attach_lines, settings::ATTACH_LINES_MIN, settings::ATTACH_LINES_MAX).map(|al| (sb, al))
         });
@@ -776,6 +978,7 @@ impl CoShell {
             Ok(v) => v,
             Err(e) => {
                 d.error = Some(e);
+                d.tab = SettingsTab::General;
                 return;
             }
         };
@@ -785,12 +988,16 @@ impl CoShell {
             ai_attach_lines: attach_lines,
             window: self.settings.window,
             ai_panel_open: self.settings.ai_panel_open,
+            ai_agent: self.settings.ai_agent,
             ..d.s.clone()
         };
         self.settings = next.sanitize();
         self.settings_draft = None;
         self.apply_settings();
         self.persist_settings();
+        if let Err(e) = self.ai.save_settings() {
+            self.notice = Some(tf("AI 설정 저장 실패: {0}", &[&e]));
+        }
     }
 
     fn update_settings(&mut self, m: Message) {
@@ -887,7 +1094,7 @@ impl CoShell {
     fn ai_send(&mut self, id: TabId) -> Task<Message> {
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
         let target = crate::ui_ai::target_label(tab);
-        self.ai.send(id, &mut tab.chat, &target)
+        self.ai.send(id, &mut tab.chat, &target, self.settings.ai_agent)
     }
 
     fn new_local(&mut self) -> Task<Message> {
@@ -1042,7 +1249,7 @@ impl CoShell {
                 Task::none()
             }
             PaletteItem::Settings => {
-                self.open_settings();
+                self.open_settings(SettingsTab::General);
                 Task::none()
             }
             PaletteItem::About => {
@@ -1321,11 +1528,56 @@ impl CoShell {
             }
             Message::Shortcut(s) => self.on_shortcut(s),
             Message::SettingsOpen => {
-                self.open_settings();
+                self.open_settings(SettingsTab::General);
+                Task::none()
+            }
+            Message::SettingsTab(t) => {
+                self.settings_tab(t);
+                Task::none()
+            }
+            Message::Composing(on) => {
+                self.composing = on;
+                Task::none()
+            }
+            Message::KeyImportOpen => {
+                self.key_import = Some(KeyImport::default());
+                Task::none()
+            }
+            Message::KeyImportClose => {
+                self.key_import = None;
+                Task::none()
+            }
+            m @ (Message::KeyImportName(_)
+            | Message::KeyImportPrivate(_)
+            | Message::KeyImportBrowse
+            | Message::KeyImportLoaded(_)
+            | Message::KeyImportPassphrase(_)
+            | Message::KeyImportNote(_)
+            | Message::KeyImportSave) => self.update_key_import(m),
+            Message::KeyCopyPublic(p) => {
+                self.notice = Some(tr("공개 키를 복사했습니다. 서버의 ~/.ssh/authorized_keys 에 붙여 넣으세요.").into());
+                iced::clipboard::write(p)
+            }
+            Message::KeyDeleteAsk(p) => {
+                self.key_delete = Some(p);
+                Task::none()
+            }
+            Message::KeyDelete(p) => {
+                self.key_delete = None;
+                let managed = self.keys.iter().any(|k| k.managed && k.path == p);
+                if managed {
+                    match crate::keys::delete(&p) {
+                        Ok(()) => {
+                            let _ = self.passwords.delete(&conn::passphrase_key(&p));
+                        }
+                        Err(e) => self.notice = Some(tf("키를 지우지 못했습니다: {0}", &[&e])),
+                    }
+                }
+                self.refresh_keys();
                 Task::none()
             }
             Message::SettingsClose => {
-                self.settings_draft = None;
+                self.close_settings();
                 self.focus_terminal()
             }
             Message::SettingsSave => {
@@ -1362,11 +1614,12 @@ impl CoShell {
                 if self.tunnel_panel { Task::none() } else { self.focus_terminal() }
             }
             Message::TunnelKind(k) => {
-                self.tunnel_form = TunnelForm { kind: k, persist: self.tunnel_form.persist, ..TunnelForm::default() };
+                let form = self.tunnel_form_mut();
+                *form = TunnelForm { kind: k, persist: form.persist, ..TunnelForm::default() };
                 Task::none()
             }
             Message::TunnelField(f, v) => {
-                let form = &mut self.tunnel_form;
+                let form = self.tunnel_form_mut();
                 match f {
                     TunnelField::RemoteHost => form.remote_host = v,
                     TunnelField::RemotePort => form.remote_port = v,
@@ -1376,7 +1629,7 @@ impl CoShell {
                 Task::none()
             }
             Message::TunnelPreset(p) => {
-                let form = &mut self.tunnel_form;
+                let form = self.tunnel_form_mut();
                 if form.kind == 'R' {
                     form.local_port = p.to_string();
                 } else {
@@ -1387,6 +1640,10 @@ impl CoShell {
             }
             Message::TunnelPersist(on) => {
                 self.tunnel_form.persist = on;
+                Task::none()
+            }
+            Message::TunnelAdd if self.editor.is_some() => {
+                self.add_editor_tunnel();
                 Task::none()
             }
             Message::TunnelAdd => self.add_tunnel(),
@@ -1454,11 +1711,8 @@ impl CoShell {
             m @ (Message::HostEditorClose
             | Message::HostField(..)
             | Message::HostEnv(_)
-            | Message::HostForwardInput(_)
-            | Message::HostForwardAdd
             | Message::HostForwardRemove(_)
             | Message::HostSave(_)
-            | Message::HostQuickApply
             | Message::HostAdvanced
             | Message::HostGroupPick(_)
             | Message::HostForgetPassword
@@ -1470,6 +1724,7 @@ impl CoShell {
 
     fn open_editor(&mut self, alias: Option<String>) -> Task<Message> {
         self.palette = None;
+        self.refresh_keys();
         let external = alias.as_deref().and_then(|a| self.user_config_entry(a));
         let def = match &alias {
             Some(a) => self.host_store.get(a).cloned().unwrap_or(HostDef { alias: a.clone(), ..HostDef::default() }),
@@ -1484,8 +1739,7 @@ impl CoShell {
             def,
             external,
             port,
-            forward_input: String::new(),
-            quick: String::new(),
+            tunnel: TunnelForm::default(),
             advanced,
             error: None,
             password: Zeroizing::default(),
@@ -1505,7 +1759,6 @@ impl CoShell {
             Message::HostField(f, v) => match f {
                 HostField::Name => ed.def.name = (!v.trim().is_empty()).then_some(v),
                 HostField::Group => ed.def.group = (!v.trim().is_empty()).then_some(v),
-                HostField::Quick => ed.quick = v,
                 HostField::Alias => ed.def.alias = v.trim().to_string(),
                 HostField::HostName => ed.def.hostname = opt(v),
                 HostField::User => ed.def.user = opt(v),
@@ -1520,34 +1773,6 @@ impl CoShell {
             }
             Message::HostGroupPick(g) => ed.def.group = Some(g),
             Message::HostAdvanced => ed.advanced = !ed.advanced,
-            Message::HostQuickApply => match parse_ssh_command(&ed.quick) {
-                Ok(c) => {
-                    if ed.def.name.is_none() && ed.original.is_none() {
-                        ed.def.name = Some(c.host.clone());
-                    }
-                    ed.def.hostname = Some(c.host);
-                    ed.def.user = c.user.or(ed.def.user.take());
-                    ed.port = c.port.map(|p| p.to_string()).unwrap_or_default();
-                    if c.identity_file.is_some() {
-                        ed.def.identity_file = c.identity_file;
-                    }
-                    if c.proxy_jump.is_some() {
-                        ed.def.proxy_jump = c.proxy_jump;
-                    }
-                    ed.quick.clear();
-                    ed.error = None;
-                }
-                Err(e) => ed.error = Some(e),
-            },
-            Message::HostForwardInput(v) => ed.forward_input = v,
-            Message::HostForwardAdd => match crate::hosts::parse_forward(ed.forward_input.trim()) {
-                Ok(_) => {
-                    ed.def.forwards.push(ed.forward_input.trim().to_string());
-                    ed.forward_input.clear();
-                    ed.error = None;
-                }
-                Err(e) => ed.error = Some(e),
-            },
             Message::HostForwardRemove(i) if i < ed.def.forwards.len() => {
                 ed.def.forwards.remove(i);
             }
@@ -1724,6 +1949,121 @@ impl CoShell {
             .is_some_and(HostDef::is_definition)
     }
 
+    /// The server editor (a modal) has its own tunnel form; otherwise it is the popover's.
+    fn tunnel_form_mut(&mut self) -> &mut TunnelForm {
+        match &mut self.editor {
+            Some(ed) => &mut ed.tunnel,
+            None => &mut self.tunnel_form,
+        }
+    }
+
+    /// Adds the editor's tunnel form to the host's auto-tunnels.
+    fn add_editor_tunnel(&mut self) {
+        let Some(ed) = &mut self.editor else { return };
+        match form_spec(&ed.tunnel) {
+            Ok((spec, _)) => {
+                let f = forward_string(&spec);
+                if !ed.def.forwards.contains(&f) {
+                    ed.def.forwards.push(f);
+                }
+                ed.tunnel = TunnelForm { kind: ed.tunnel.kind, ..TunnelForm::default() };
+            }
+            Err(e) => ed.tunnel.error = Some(e),
+        }
+    }
+
+    /// Agent mode: the reply that just ended asked for a read-only command. Type it into the
+    /// user's terminal (they watch it run) and read the result off the screen for the model.
+    fn agent_step(&mut self, id: TabId) -> Task<Message> {
+        if !self.settings.ai_agent {
+            return Task::none();
+        }
+        let Some(Tab { phase: Phase::Live(s), exited: false, chat, .. }) = self.tabs.iter_mut().find(|t| t.id == id) else {
+            return Task::none();
+        };
+        if chat.agent_steps() >= AGENT_MAX_STEPS {
+            return Task::none();
+        }
+        let Some(turn) = chat.turns.last_mut().filter(|t| t.role == Role::Assistant && !t.stopped) else { return Task::none() };
+        let first = assist::segments(&turn.text).into_iter().find_map(|seg| match seg {
+            assist::Segment::Code { lang, code, closed: true } if assist::is_shell(&lang) => Some(assist::command_text(&code)),
+            _ => None,
+        });
+        let Some(cmd) = first.filter(|c| assist::auto_runnable(c)) else { return Task::none() };
+        let term = s.term().clone();
+        // Only at an idle prompt: never type into a running program or over the user's half-typed line.
+        let prompt = coshell_term::logical_lines(&term, 4).pop().unwrap_or_default();
+        let bracketed = term.lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+        let bytes = assist::run_bytes(&cmd, bracketed);
+        let (Some(bytes), true) = (bytes, assist::looks_like_prompt(&prompt)) else {
+            turn.exec = Some(Exec {
+                cmd,
+                state: ExecState::Failed(tr("터미널이 다른 작업 중이라 실행하지 못했어요").into()),
+                sent: true,
+                open: true,
+            });
+            return Task::none();
+        };
+        s.write(&bytes);
+        turn.exec = Some(Exec { cmd: cmd.clone(), state: ExecState::Running, sent: false, open: false });
+        let (task, handle) = Task::perform(watch_screen(term, prompt, cmd), move |r| Message::AgentDone(id, r)).abortable();
+        chat.streaming = Some(handle);
+        task
+    }
+
+    /// Result is in: show it, and pass it on (production waits for a click).
+    fn agent_done(&mut self, id: TabId, r: Result<ScreenRun, String>) -> Task<Message> {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+        let prod = tab.env == Env::Prod;
+        tab.chat.streaming = None;
+        let Some(exec) = tab.chat.turns.last_mut().and_then(|t| t.exec.as_mut()).filter(|e| e.state == ExecState::Running) else {
+            return Task::none();
+        };
+        exec.state = match r {
+            Ok(run) => {
+                let mut text = assist::clean_output(run.text.as_bytes(), false);
+                if !run.finished {
+                    text.push_str(&tf("\n… ({0}초가 지나도 아직 실행 중)", &[&AGENT_TIMEOUT.as_secs()]));
+                }
+                let (output, secrets) = coshell_ai::redact::mask(&text);
+                ExecState::Done { output, exit: None, secrets }
+            }
+            Err(e) => ExecState::Failed(e),
+        };
+        if prod { Task::none() } else { self.agent_send(id) }
+    }
+
+    /// Feed the last command result to the model and let it continue.
+    fn agent_send(&mut self, id: TabId) -> Task<Message> {
+        let agent = self.settings.ai_agent;
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+        let target = crate::ui_ai::target_label(tab);
+        let chat = &mut tab.chat;
+        if chat.is_streaming() {
+            return Task::none();
+        }
+        let Some(exec) = chat.turns.last_mut().and_then(|t| t.exec.as_mut()).filter(|e| !e.sent && e.state != ExecState::Running) else {
+            return Task::none();
+        };
+        exec.sent = true;
+        let sent = match &exec.state {
+            ExecState::Done { output, exit, .. } => assist::command_result(&exec.cmd, *exit, output),
+            ExecState::Failed(e) => assist::command_result(&exec.cmd, None, &format!("[could not run: {e}]")),
+            ExecState::Running => unreachable!("filtered above"),
+        };
+        chat.turns.push(Turn {
+            role: Role::User,
+            text: String::new(),
+            sent,
+            attachment: None,
+            model: String::new(),
+            stopped: false,
+            exec: None,
+            hidden: true,
+        });
+        self.ai.retry(id, chat, &target, agent)
+    }
+
     fn add_tunnel(&mut self) -> Task<Message> {
         let Some(id) = self.active.filter(|_| self.active_tab().is_some_and(|t| t.conn.is_some())) else {
             self.tunnel_form.error = Some(tr("연결된 SSH 세션이 없습니다").into());
@@ -1808,6 +2148,8 @@ impl CoShell {
                 Task::none()
             }
             Shortcut::Settings => self.update(if self.settings_draft.is_some() { Message::SettingsClose } else { Message::SettingsOpen }),
+            Shortcut::Escape if self.key_import.is_some() => self.update(Message::KeyImportClose),
+            Shortcut::Escape if self.editor.is_some() => self.update(Message::HostEditorClose),
             Shortcut::Escape if self.settings_draft.is_some() => self.update(Message::SettingsClose),
             Shortcut::Escape if self.close_confirm.is_some() => self.update(Message::CloseCancel),
             Shortcut::Nth(n) => match self.tabs.get(n).map(|t| t.id) {
@@ -1822,9 +2164,7 @@ impl CoShell {
             Shortcut::Escape if self.about => self.update(Message::About),
             Shortcut::Escape if self.palette.is_some() => self.update(Message::ClosePalette),
             Shortcut::Escape if self.tunnel_panel => self.update(Message::TunnelPanel),
-            Shortcut::Escape if self.editor.is_some() => self.update(Message::HostEditorClose),
             Shortcut::Escape if self.attach_confirm.is_some() => self.update(Message::AttachCancel),
-            Shortcut::Escape if self.ai.settings.is_some() => self.update(Message::AiSettingsClose),
             Shortcut::Escape if self.search.is_some() && self.active_tab().is_none_or(|t| t.prompt.is_none()) => {
                 self.update(Message::SearchClose)
             }
@@ -1955,6 +2295,7 @@ impl CoShell {
                 Task::none()
             }
             Message::AiEvent(id, item) => {
+                let mut finished = false;
                 if let Some(c) = self.chat_mut(id) {
                     match item {
                         Ok(StreamEvent::Delta(t)) => {
@@ -1964,9 +2305,11 @@ impl CoShell {
                         }
                         Ok(StreamEvent::Done { stop_reason }) => {
                             c.streaming = None;
-                            if matches!(stop_reason.as_deref(), Some("max_tokens" | "length")) {
+                            let cut = matches!(stop_reason.as_deref(), Some("max_tokens" | "length"));
+                            if cut {
                                 c.error = Some(tr("응답이 길이 제한에서 잘렸습니다").into());
                             }
+                            finished = !cut;
                         }
                         Err(e) => {
                             c.streaming = None;
@@ -1977,7 +2320,7 @@ impl CoShell {
                         }
                     }
                 }
-                Task::none()
+                if finished { self.agent_step(id) } else { Task::none() }
             }
             Message::AiAttach(id) => {
                 self.attach_output(id);
@@ -1999,7 +2342,7 @@ impl CoShell {
             Message::AiRetry(id) => {
                 let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
                 let target = crate::ui_ai::target_label(tab);
-                self.ai.retry(id, &mut tab.chat, &target)
+                self.ai.retry(id, &mut tab.chat, &target, self.settings.ai_agent)
             }
             Message::AiSuggest(id, text, attach) => {
                 if attach {
@@ -2023,28 +2366,36 @@ impl CoShell {
                 Task::none()
             }
             Message::AiCopy(text) => iced::clipboard::write(text),
-            Message::AiInsert(id, cmd) => {
-                if let Some(Tab { phase: Phase::Live(s), exited: false, .. }) = self.tabs.iter().find(|t| t.id == id) {
+            Message::AgentDone(id, r) => self.agent_done(id, r),
+            Message::AgentSend(id) => self.agent_send(id),
+            Message::AgentToggle(id, i) => {
+                if let Some(e) = self.chat_mut(id).and_then(|c| c.turns.get_mut(i)).and_then(|t| t.exec.as_mut()) {
+                    e.open = !e.open;
+                }
+                Task::none()
+            }
+            Message::AiAutoRun => {
+                self.settings.ai_agent = !self.settings.ai_agent;
+                self.state_dirty = true;
+                Task::none()
+            }
+            Message::AiRun(id, cmd) => {
+                let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+                if assist::run_needs_confirm(&cmd, tab.env == Env::Prod) && tab.chat.run_confirm.as_deref() != Some(cmd.as_str()) {
+                    tab.chat.run_confirm = Some(cmd);
+                    return Task::none();
+                }
+                tab.chat.run_confirm = None;
+                if let Tab { phase: Phase::Live(s), exited: false, .. } = tab {
                     let bracketed = s.term().lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
-                    // Insert only; the user presses Enter to run it.
-                    if let Some(bytes) = assist::insert_bytes(&cmd, bracketed) {
+                    if let Some(bytes) = assist::run_bytes(&cmd, bracketed) {
                         s.write(&bytes);
                     }
                 }
                 self.focus_terminal()
             }
             Message::AiSettingsOpen => {
-                self.ai.open_settings();
-                Task::none()
-            }
-            Message::AiSettingsClose => {
-                self.ai.settings = None;
-                Task::none()
-            }
-            Message::AiSettingsSave => {
-                if let Err(e) = self.ai.save_settings() {
-                    self.notice = Some(tf("AI 설정 저장 실패: {0}", &[&e]));
-                }
+                self.open_settings(SettingsTab::Ai);
                 Task::none()
             }
             Message::AiSettingsSaveKey => {
@@ -2065,6 +2416,10 @@ impl CoShell {
             }
             Message::AiSettingsFetch(test_only) => self.ai.fetch_models(test_only),
             m => {
+                // A save error is about the old input; editing clears it.
+                if let Some(d) = &mut self.settings_draft {
+                    d.error = None;
+                }
                 if let Some(s) = &mut self.ai.settings {
                     match m {
                         Message::AiSettingsSelect(i) if i < s.draft.profiles.len() => {
@@ -2072,6 +2427,32 @@ impl CoShell {
                             s.models.clear();
                             s.status = None;
                             s.key_input = zeroize::Zeroizing::new(String::new());
+                            s.reload_adv();
+                        }
+                        Message::AiSettingsAdvanced => s.advanced_open = !s.advanced_open,
+                        Message::AiSettingsAuth(a) => {
+                            s.profile_mut().advanced.auth = a;
+                            s.apply_adv();
+                        }
+                        Message::AiSettingsAdv(f, v) => {
+                            let a = &mut s.profile_mut().advanced;
+                            match f {
+                                AdvField::ChatPath => a.chat_path = v,
+                                AdvField::ModelsPath => a.models_path = v,
+                                AdvField::AuthHeader => a.auth_header = v,
+                                AdvField::AnthropicVersion => a.anthropic_version = v,
+                                AdvField::MaxTokens => s.adv.max_tokens = v,
+                                AdvField::Temperature => s.adv.temperature = v,
+                            }
+                            s.apply_adv();
+                        }
+                        Message::AiSettingsHeaders(act) => {
+                            s.adv.headers.perform(act);
+                            s.apply_adv();
+                        }
+                        Message::AiSettingsExtra(act) => {
+                            s.adv.extra.perform(act);
+                            s.apply_adv();
                         }
                         Message::AiSettingsName(v) => s.profile_mut().name = v,
                         Message::AiSettingsBase(v) => s.profile_mut().base_url = v,
@@ -2202,4 +2583,31 @@ fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut cmd = std::process::Command::new("xdg-open");
     cmd.arg(url).spawn().map(|_| ())
+}
+
+/// A command the assistant typed into the user's terminal, as it appeared on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenRun {
+    pub text: String,
+    /// The shell came back to a prompt (otherwise it was still running at the time limit).
+    pub finished: bool,
+}
+
+/// Watch the terminal until `cmd` (typed at `prompt`) is done: its output has stopped
+/// changing and a prompt is back. Gives up at `AGENT_TIMEOUT` with what is on screen so far.
+pub(crate) async fn watch_screen(term: coshell_term::SharedTerm, prompt: String, cmd: String) -> Result<ScreenRun, String> {
+    let start = std::time::Instant::now();
+    let mut last: Option<String> = None;
+    loop {
+        tokio::time::sleep(AGENT_POLL).await;
+        let lines = coshell_term::logical_lines(&term, AGENT_WATCH_ROWS);
+        match assist::screen_output(&lines, &prompt, &cmd) {
+            // Same result twice in a row: it is not still printing.
+            Some((text, true)) if last.as_deref() == Some(text.as_str()) => return Ok(ScreenRun { text, finished: true }),
+            Some((text, true)) => last = Some(text),
+            Some((text, false)) if start.elapsed() >= AGENT_TIMEOUT => return Ok(ScreenRun { text, finished: false }),
+            None if start.elapsed() >= AGENT_TIMEOUT => return Err(tr("터미널에서 명령을 찾지 못했습니다").into()),
+            _ => last = None,
+        }
+    }
 }

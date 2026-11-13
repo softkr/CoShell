@@ -7,7 +7,7 @@ use coshell_ssh::ForwardSpec;
 use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
-use crate::app::{CoShell, Message, Tab, TunnelEntry, TunnelField, TunnelState, form_spec};
+use crate::app::{CoShell, Message, Tab, TunnelEntry, TunnelField, TunnelForm, TunnelState, form_spec};
 use crate::theme::{self, alpha};
 use crate::ui::{Btn, El, btn, btn_style, card_style, input_style, mono, muted};
 
@@ -67,8 +67,12 @@ fn bound_port(e: &TunnelEntry) -> Option<u16> {
 
 /// Plain-language description of a forward.
 fn describe(e: &TunnelEntry) -> (&'static str, String) {
-    let b = bound_port(e);
-    match &e.spec {
+    describe_spec(&e.spec, bound_port(e))
+}
+
+/// Kind label and route; `b` is the port actually bound, when running.
+pub fn describe_spec(spec: &ForwardSpec, b: Option<u16>) -> (&'static str, String) {
+    match spec {
         ForwardSpec::Local { port, host, host_port, .. } => {
             (tr("서버 → 내 PC"), tf("localhost:{0}  →  서버 {1}:{2}", &[&(b.unwrap_or(*port)), &host, &host_port]))
         }
@@ -186,8 +190,9 @@ fn port_input<'a>(label: &'a str, placeholder: &'a str, value: &'a str, f: Tunne
     .into()
 }
 
-fn add_form(app: &CoShell) -> El<'_> {
-    let f = &app.tunnel_form;
+/// Purpose → common port → ports, with a sentence saying what will happen.
+/// Shared by the popover (opens now) and the server editor (opens on every connect).
+pub fn builder(f: &TunnelForm) -> El<'_> {
     let presets: &[(&str, u16)] = match f.kind {
         'L' => &SERVER_PRESETS,
         'R' => &LOCAL_PRESETS,
@@ -200,7 +205,7 @@ fn add_form(app: &CoShell) -> El<'_> {
             .style(|_, _| iced::widget::button::Style {
                 background: Some(Background::Color(theme::BG_2)),
                 text_color: theme::TEXT,
-                border: Border { color: theme::LINE_2, width: 1.0, radius: 10.0.into() },
+                border: Border { color: theme::LINE_2, width: 1.0, radius: crate::ui::R_CARD.into() },
                 ..Default::default()
             })
             .into()
@@ -231,13 +236,7 @@ fn add_form(app: &CoShell) -> El<'_> {
         Ok((ForwardSpec::Dynamic { port, .. }, _)) => muted(tf("브라우저·앱의 프록시를 SOCKS5 localhost:{0} 로 지정하세요", &[&port])),
         Err(_) => muted(tr("포트를 입력하거나 위에서 고르세요")),
     };
-    let persist: El<'_> = if app.can_persist_tunnels() {
-        checkbox(f.persist).label(tr("다음 접속 때도 자동으로 열기")).on_toggle(Message::TunnelPersist).size(14).text_size(11.5).into()
-    } else {
-        muted(tr("서버 목록에 저장된 서버라면 다음 접속 때 자동으로 열도록 저장할 수 있습니다"))
-    };
     let mut col = column![
-        text(tr("새 터널")).size(12.5),
         row![
             purpose('L', f.kind, tr("서버 포트 열기"), tr("서버의 DB·웹을 내 PC에서 접속")),
             purpose('R', f.kind, tr("내 PC 포트 공유"), tr("내 PC 서비스를 서버에 공개")),
@@ -253,6 +252,17 @@ fn add_form(app: &CoShell) -> El<'_> {
     if let Some(e) = &f.error {
         col = col.push(text(e.clone()).size(11).color(theme::ERR_TX));
     }
+    col.into()
+}
+
+fn add_form(app: &CoShell) -> El<'_> {
+    let f = &app.tunnel_form;
+    let persist: El<'_> = if app.can_persist_tunnels() {
+        checkbox(f.persist).label(tr("다음 접속 때도 자동으로 열기")).on_toggle(Message::TunnelPersist).size(14).text_size(11.5).into()
+    } else {
+        muted(tr("서버 목록에 저장된 서버라면 다음 접속 때 자동으로 열도록 저장할 수 있습니다"))
+    };
+    let mut col = column![text(tr("새 터널")).size(12.5), builder(f)].spacing(8);
     let connected = app.active_tab().is_some_and(|t| t.conn.is_some());
     let open_btn = btn(tr("터널 열기"), Btn::Primary, connected.then_some(Message::TunnelAdd));
     col = col.push(row![persist, Space::new().width(Length::Fill), open_btn].align_y(Alignment::Center));
@@ -263,7 +273,7 @@ fn add_form(app: &CoShell) -> El<'_> {
         .padding(12)
         .style(|_| container::Style {
             background: Some(Background::Color(theme::BG_2)),
-            border: Border { color: theme::LINE_2, width: 1.0, radius: 10.0.into() },
+            border: Border { color: theme::LINE_2, width: 1.0, radius: crate::ui::R_CARD.into() },
             ..Default::default()
         })
         .into()

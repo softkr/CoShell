@@ -6,8 +6,8 @@ mod provider;
 pub mod redact;
 mod sse;
 
-pub use profile::{Format, KeySource, Keychain, Profile, ProfileStore, SecretStore, resolve_key};
-pub use provider::{Client, endpoint};
+pub use profile::{Advanced, AuthStyle, Format, Header, KeySource, Keychain, Profile, ProfileStore, SecretStore, resolve_key};
+pub use provider::{Client, chat_url, endpoint, models_url};
 
 /// Default response budget (Anthropic requires `max_tokens`).
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;

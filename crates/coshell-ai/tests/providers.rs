@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use coshell_ai::{AiError, ChatMessage, ChatRequest, Client, Format, Profile, Role, StreamEvent, endpoint};
+use coshell_ai::{Advanced, AiError, AuthStyle, ChatMessage, ChatRequest, Client, Format, Header, Profile, Role, StreamEvent, chat_url, endpoint};
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -69,7 +69,7 @@ async fn serve_once(status: u16, content_type: &'static str, chunks: Vec<Vec<u8>
 }
 
 fn profile(format: Format, base: &str) -> Profile {
-    Profile { id: "t".into(), name: "t".into(), format, base_url: base.into(), model: "m-1".into() }
+    Profile { id: "t".into(), name: "t".into(), format, base_url: base.into(), model: "m-1".into(), advanced: Advanced::default() }
 }
 
 fn req() -> ChatRequest {
@@ -208,4 +208,69 @@ fn endpoint_joining() {
     assert_eq!(endpoint(&p("https://api.openai.com"), "models"), "https://api.openai.com/v1/models");
     assert_eq!(endpoint(&p("https://openrouter.ai/api/v1"), "chat/completions"), "https://openrouter.ai/api/v1/chat/completions");
     assert_eq!(endpoint(&p("http://localhost:11434/"), "models"), "http://localhost:11434/v1/models");
+}
+
+#[tokio::test]
+async fn anthropic_profile_customised_path_auth_headers_and_body() {
+    let (base, cap) = serve_once(200, "text/event-stream", vec![b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec()]).await;
+    let mut p = profile(Format::Anthropic, &base);
+    p.advanced = Advanced {
+        chat_path: "/anthropic/v1/messages".into(),
+        auth: AuthStyle::Bearer,
+        headers: vec![Header { name: "X-Team".into(), value: "ops".into() }],
+        max_tokens: Some(1024),
+        temperature: Some(0.2),
+        anthropic_version: "2024-01-01".into(),
+        extra_body: r#"{"thinking": {"type": "enabled", "budget_tokens": 2000}, "temperature": 0.3}"#.into(),
+        ..Advanced::default()
+    };
+    let _ = collect(&Client::new(), &p, Some("sk-ant")).await;
+    let c = cap.await.unwrap();
+    assert_eq!(c.path, "/anthropic/v1/messages");
+    assert_eq!(c.header("authorization"), Some("Bearer sk-ant"));
+    assert_eq!(c.header("x-api-key"), None);
+    assert_eq!(c.header("x-team"), Some("ops"));
+    assert_eq!(c.header("anthropic-version"), Some("2024-01-01"));
+    let b = c.json();
+    assert_eq!(b["max_tokens"], 1024);
+    assert_eq!(b["temperature"], 0.3, "extra JSON wins");
+    assert_eq!(b["thinking"]["budget_tokens"], 2000);
+}
+
+#[tokio::test]
+async fn openai_profile_custom_header_auth_and_full_url() {
+    let (base, cap) = serve_once(200, "text/event-stream", vec![b"data: [DONE]\n\n".to_vec()]).await;
+    let mut p = profile(Format::OpenAi, "https://ignored.example");
+    p.advanced = Advanced {
+        chat_path: format!("{base}/openai/deployments/gpt/chat/completions?api-version=2024-10-21"),
+        auth: AuthStyle::Header,
+        auth_header: "api-key".into(),
+        max_tokens: Some(300),
+        ..Advanced::default()
+    };
+    assert!(chat_url(&p).starts_with(&base), "a full URL is used as is");
+    let _ = collect(&Client::new(), &p, Some("azure-key")).await;
+    let c = cap.await.unwrap();
+    assert_eq!(c.path, "/openai/deployments/gpt/chat/completions?api-version=2024-10-21");
+    assert_eq!(c.header("api-key"), Some("azure-key"));
+    assert_eq!(c.header("authorization"), None);
+    assert_eq!(c.json()["max_tokens"], 300);
+}
+
+#[test]
+fn advanced_settings_are_checked_and_stay_out_of_the_file_when_unused() {
+    let ok = Advanced { headers: vec![Header { name: "HTTP-Referer".into(), value: "https://coshell".into() }], ..Advanced::default() };
+    assert!(ok.check().is_ok());
+    for bad in [
+        Advanced { headers: vec![Header { name: "Bad Name".into(), value: "x".into() }], ..Advanced::default() },
+        Advanced { headers: vec![Header { name: "X".into(), value: "a\r\nInjected: 1".into() }], ..Advanced::default() },
+        Advanced { auth: AuthStyle::Header, ..Advanced::default() },
+        Advanced { temperature: Some(3.0), ..Advanced::default() },
+        Advanced { extra_body: "[1, 2]".into(), ..Advanced::default() },
+        Advanced { extra_body: "{not json".into(), ..Advanced::default() },
+    ] {
+        assert!(bad.check().is_err(), "{bad:?}");
+    }
+    let plain = toml::to_string(&profile(Format::OpenAi, "https://api.openai.com")).unwrap();
+    assert!(!plain.contains("advanced"), "{plain}");
 }

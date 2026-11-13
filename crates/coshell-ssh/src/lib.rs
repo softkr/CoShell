@@ -6,9 +6,12 @@
 //! verified against `known_hosts` independently.
 
 mod auth;
+mod exec;
 pub mod config;
 mod forward;
 mod hostkey;
+pub mod keys;
+pub use exec::ExecOutput;
 mod prompt;
 mod shell;
 
@@ -46,8 +49,9 @@ pub enum Auth {
     /// Ask the [`Prompter`] (keyboard-interactive / password).
     Interactive,
     /// OpenSSH-like: agent → key file (`identity` or ~/.ssh defaults) →
-    /// saved `password` (tried once) → prompts.
-    Auto { identity: Option<PathBuf>, password: Option<Zeroizing<String>> },
+    /// saved `password` (tried once) → prompts. `passphrase` unlocks `identity`
+    /// (asked for when missing and the key is encrypted).
+    Auto { identity: Option<PathBuf>, password: Option<Zeroizing<String>>, passphrase: Option<Zeroizing<String>> },
 }
 
 impl std::fmt::Debug for Auth {
@@ -58,8 +62,9 @@ impl std::fmt::Debug for Auth {
             Auth::KeyFile { path, .. } => write!(f, "KeyFile({})", path.display()),
             Auth::Password(_) => f.write_str("Password(***)"),
             Auth::Interactive => f.write_str("Interactive"),
-            Auth::Auto { identity, password } => {
-                write!(f, "Auto({identity:?}, password: {})", if password.is_some() { "***" } else { "none" })
+            Auth::Auto { identity, password, passphrase } => {
+                let hidden = |s: &Option<Zeroizing<String>>| if s.is_some() { "***" } else { "none" };
+                write!(f, "Auto({identity:?}, password: {}, passphrase: {})", hidden(password), hidden(passphrase))
             }
         }
     }

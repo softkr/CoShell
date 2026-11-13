@@ -7,7 +7,7 @@ use futures::{Stream, StreamExt, stream};
 use serde_json::{Value, json};
 
 use crate::sse::{SseEvent, SseParser};
-use crate::{AiError, ChatRequest, Format, Profile, StreamEvent};
+use crate::{AiError, AuthStyle, ChatRequest, Format, Profile, StreamEvent};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,6 +27,32 @@ fn chat_path(format: Format) -> &'static str {
     match format {
         Format::Anthropic => "messages",
         Format::OpenAi => "chat/completions",
+    }
+}
+
+/// A custom path joined to the base URL, or a full URL as is.
+fn custom(profile: &Profile, path: &str) -> String {
+    let p = path.trim();
+    if p.starts_with("http://") || p.starts_with("https://") {
+        p.to_string()
+    } else {
+        format!("{}/{}", profile.base_url.trim().trim_end_matches('/'), p.trim_start_matches('/'))
+    }
+}
+
+/// Where chat requests go (the profile's own path when set).
+pub fn chat_url(profile: &Profile) -> String {
+    match profile.advanced.chat_path.trim() {
+        "" => endpoint(profile, chat_path(profile.format)),
+        p => custom(profile, p),
+    }
+}
+
+/// Where the model list is read.
+pub fn models_url(profile: &Profile) -> String {
+    match profile.advanced.models_path.trim() {
+        "" => endpoint(profile, "models"),
+        p => custom(profile, p),
     }
 }
 
@@ -52,25 +78,34 @@ impl Client {
     }
 
     fn request(&self, method: reqwest::Method, profile: &Profile, key: Option<&str>, url: String) -> reqwest::RequestBuilder {
-        let rb = self.http.request(method, url);
-        match (profile.format, key) {
-            (Format::Anthropic, k) => {
-                let rb = rb.header("anthropic-version", ANTHROPIC_VERSION);
-                match k {
-                    Some(k) => rb.header("x-api-key", k),
-                    None => rb,
-                }
-            }
-            (Format::OpenAi, Some(k)) => rb.bearer_auth(k),
-            (Format::OpenAi, None) => rb,
+        let adv = &profile.advanced;
+        let mut rb = self.http.request(method, url);
+        if profile.format == Format::Anthropic {
+            let v = adv.anthropic_version.trim();
+            rb = rb.header("anthropic-version", if v.is_empty() { ANTHROPIC_VERSION } else { v });
         }
+        if let Some(k) = key {
+            rb = match (adv.auth, profile.format) {
+                (AuthStyle::Auto, Format::Anthropic) => rb.header("x-api-key", k),
+                (AuthStyle::Auto, Format::OpenAi) | (AuthStyle::Bearer, _) => rb.bearer_auth(k),
+                (AuthStyle::Header, _) => rb.header(adv.auth_header.trim(), k),
+                (AuthStyle::None, _) => rb,
+            };
+        }
+        for h in &adv.headers {
+            rb = rb.header(h.name.as_str(), h.value.as_str());
+        }
+        rb
     }
 
-    fn body(profile: &Profile, req: &ChatRequest) -> Value {
+    /// Request body; the profile's parameters and extra JSON go on top.
+    pub(crate) fn body(profile: &Profile, req: &ChatRequest) -> Result<Value, AiError> {
+        let adv = &profile.advanced;
         let msgs: Vec<Value> = req.messages.iter().map(|m| json!({ "role": m.role.as_str(), "content": m.content })).collect();
-        match profile.format {
+        let mut b = match profile.format {
             Format::Anthropic => {
-                let mut b = json!({ "model": profile.model, "max_tokens": req.max_tokens, "messages": msgs, "stream": true });
+                let max = adv.max_tokens.unwrap_or(req.max_tokens);
+                let mut b = json!({ "model": profile.model, "max_tokens": max, "messages": msgs, "stream": true });
                 if !req.system.is_empty() {
                     b["system"] = json!(req.system);
                 }
@@ -82,9 +117,26 @@ impl Client {
                     all.push(json!({ "role": "system", "content": req.system }));
                 }
                 all.extend(msgs);
-                json!({ "model": profile.model, "messages": all, "stream": true })
+                let mut b = json!({ "model": profile.model, "messages": all, "stream": true });
+                if let Some(m) = adv.max_tokens {
+                    b["max_tokens"] = json!(m);
+                }
+                b
+            }
+        };
+        if let Some(t) = adv.temperature {
+            b["temperature"] = json!(t);
+        }
+        if !adv.extra_body.trim().is_empty() {
+            let extra: Value = serde_json::from_str(&adv.extra_body).map_err(|e| AiError::Protocol(e.to_string()))?;
+            let Value::Object(extra) = extra else {
+                return Err(AiError::Protocol(if crate::english() { "extra JSON is not an object" } else { "추가 JSON이 객체가 아닙니다" }.into()));
+            };
+            for (k, v) in extra {
+                b[k] = v;
             }
         }
+        Ok(b)
     }
 
     /// Stream a chat completion. Errors are yielded as items; the stream ends
@@ -95,13 +147,13 @@ impl Client {
         key: Option<String>,
         req: &ChatRequest,
     ) -> impl Stream<Item = Result<StreamEvent, AiError>> + Send + 'static {
+        let body = Self::body(profile, req);
         let rb = self
-            .request(reqwest::Method::POST, profile, key.as_deref(), endpoint(profile, chat_path(profile.format)))
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&Self::body(profile, req));
+            .request(reqwest::Method::POST, profile, key.as_deref(), chat_url(profile))
+            .header(reqwest::header::ACCEPT, "text/event-stream");
         let format = profile.format;
         let start = Box::pin(async move {
-            let resp = rb.send().await.map_err(|e| AiError::Network(e.without_url().to_string()))?;
+            let resp = rb.json(&body?).send().await.map_err(|e| AiError::Network(e.without_url().to_string()))?;
             Ok::<_, AiError>(Box::pin(check(resp).await?.bytes_stream()))
         });
 
@@ -159,7 +211,7 @@ impl Client {
     /// `GET /v1/models` → model ids.
     pub async fn list_models(&self, profile: &Profile, key: Option<String>) -> Result<Vec<String>, AiError> {
         let resp = self
-            .request(reqwest::Method::GET, profile, key.as_deref(), endpoint(profile, "models"))
+            .request(reqwest::Method::GET, profile, key.as_deref(), models_url(profile))
             .timeout(REQUEST_TIMEOUT)
             .send()
             .await

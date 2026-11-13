@@ -78,12 +78,18 @@ pub fn password_key(h: &HostSpec) -> String {
     format!("{}@{}:{}", h.user, h.host, h.port)
 }
 
-/// Give every `Auth::Auto` hop its saved password, if any.
+/// Keychain account for a key file's passphrase.
+pub fn passphrase_key(path: &std::path::Path) -> String {
+    format!("key:{}", path.display())
+}
+
+/// Give every `Auth::Auto` hop its saved password and key passphrase, if any.
 pub(crate) fn fill_saved_passwords(chain: &mut [HostSpec], passwords: &dyn SecretStore) {
     for h in chain {
         let key = password_key(h);
-        if let Auth::Auto { password, .. } = &mut h.auth {
+        if let Auth::Auto { password, identity, passphrase } = &mut h.auth {
             *password = passwords.get(&key);
+            *passphrase = identity.as_deref().and_then(|p| passwords.get(&passphrase_key(p)));
         }
     }
 }

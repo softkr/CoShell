@@ -2,7 +2,7 @@
 
 use crate::i18n::{tf, tr};
 use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text, text_input};
-use iced::{Alignment, Background, Border, Color, Font, Length};
+use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
 use crate::ai::Attachment;
 use crate::app::{CoShell, HostEditor, HostField, Message};
@@ -11,6 +11,8 @@ use crate::theme::{self, alpha};
 use crate::ui::{Btn, El, btn, btn_style, card_style, input_style, mono, muted};
 
 const EDITOR_W: f32 = 620.0;
+/// The form scrolls beyond this so the buttons always stay on screen.
+const EDITOR_BODY_MAX_H: f32 = 560.0;
 const PREVIEW_H: f32 = 300.0;
 const NO_JUMP: &str = "사용 안 함";
 
@@ -46,7 +48,7 @@ fn env_segment(current: Env) -> El<'static> {
             .style(move |_, _| iced::widget::button::Style {
                 background: Some(Background::Color(if on { theme::BG_3 } else { Color::TRANSPARENT })),
                 text_color: theme::TEXT,
-                border: Border { color: if on { alpha(c, 0.6) } else { theme::LINE_2 }, width: 1.0, radius: 6.0.into() },
+                border: Border { color: if on { alpha(c, 0.6) } else { theme::LINE_2 }, width: 1.0, radius: crate::ui::R_CONTROL.into() },
                 ..Default::default()
             })
             .into()
@@ -102,25 +104,6 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
     };
     let mut col = column![text(title).size(14)].spacing(10);
 
-    if ed.external.is_none() {
-        col = col.push(
-            column![
-                text(tr("ssh 명령으로 채우기")).size(11.5).color(theme::TEXT_2),
-                row![
-                    text_input(tr("예: ssh -p 2222 user@192.168.0.10"), &ed.quick)
-                        .on_input(|v| Message::HostField(HostField::Quick, v))
-                        .on_submit(Message::HostQuickApply)
-                        .font(Font::MONOSPACE)
-                        .size(12)
-                        .padding([6, 10])
-                        .style(input_style),
-                    btn(tr("채우기"), Btn::Plain, (!ed.quick.trim().is_empty()).then_some(Message::HostQuickApply)),
-                ]
-                .spacing(8),
-            ]
-            .spacing(4),
-        );
-    }
     col = col.push(
         row![
             field(tr("이름"), tr("예: 웹 서버"), d.name.as_deref().unwrap_or(""), HostField::Name),
@@ -138,7 +121,7 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
                 .style(move |_, _| iced::widget::button::Style {
                     background: Some(Background::Color(if on { theme::BG_3 } else { theme::BG_2 })),
                     text_color: theme::TEXT,
-                    border: Border { color: theme::LINE_2, width: 1.0, radius: 10.0.into() },
+                    border: Border { color: theme::LINE_2, width: 1.0, radius: crate::ui::R_CARD.into() },
                     ..Default::default()
                 })
                 .into()
@@ -148,7 +131,7 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
 
     col = col.push(text(tr("환경")).size(11.5).color(theme::TEXT_2)).push(env_segment(d.env));
     if d.env == Env::Prod {
-        col = col.push(muted(tr("운영 서버는 빨간색으로 표시되고, AI에 터미널 출력을 보내기 전에 한 번 더 확인합니다.")));
+        col = col.push(muted(tr("운영 서버는 탭에 빨간 표시가 붙고, 변경 명령은 한 번 더 눌러야 실행되며, AI에 터미널 출력을 보내기 전에 확인합니다.")));
     }
 
     match &ed.external {
@@ -208,14 +191,16 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
                                 })
                                 .text_size(12)
                                 .padding([6, 10])
-                                .width(Length::Fill),
+                                .width(Length::Fill)
+                                .style(crate::ui::pick_style)
+                                .menu_style(crate::ui::menu_style),
                             ]
                             .spacing(4)
                             .width(Length::Fill),
                         ]
                         .spacing(10),
                     )
-                    .push(field(tr("SSH 키 파일"), tr("비워 두면 ssh-agent와 기본 키를 사용합니다"), d.identity_file.as_deref().unwrap_or(""), HostField::Identity));
+                    .push(crate::ui_keys::picker(app, d.identity_file.as_deref()));
 
                 let mut fw = column![
                     text(tr("자동 터널")).size(11.5).color(theme::TEXT_2),
@@ -223,33 +208,54 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
                 ]
                 .spacing(4);
                 for (i, f) in d.forwards.iter().enumerate() {
+                    // Stored as `L:bind:port:host:port`; shown in words.
+                    let (kind, desc) = match crate::hosts::parse_forward(f) {
+                        Ok(spec) => crate::ui_tunnel::describe_spec(&spec, None),
+                        Err(_) => ("", f.clone()),
+                    };
                     fw = fw.push(
-                        row![
-                            mono(f.clone(), 12.0, theme::TEXT),
-                            Space::new().width(Length::Fill),
-                            button(text("×").size(12).color(theme::TEXT_3)).padding([0, 6]).style(btn_style(Btn::Ghost)).on_press(Message::HostForwardRemove(i)),
-                        ]
-                        .align_y(Alignment::Center),
+                        container(
+                            row![
+                                text(kind).size(11).color(theme::ACCENT),
+                                mono(desc, 11.5, theme::TEXT),
+                                Space::new().width(Length::Fill),
+                                button(text("×").size(12).color(theme::TEXT_3))
+                                    .padding([0, 6])
+                                    .style(btn_style(Btn::Ghost))
+                                    .on_press(Message::HostForwardRemove(i)),
+                            ]
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                        )
+                        .padding([6, 10])
+                        .style(|_| container::Style {
+                            background: Some(Background::Color(theme::BG_2)),
+                            border: Border { radius: crate::ui::R_CONTROL.into(), ..Default::default() },
+                            ..Default::default()
+                        }),
                     );
                 }
+                let ready = crate::app::form_spec(&ed.tunnel).is_ok();
                 fw = fw.push(
-                    row![
-                        text_input(tr("예: L:3306:localhost:3306"), &ed.forward_input)
-                            .on_input(Message::HostForwardInput)
-                            .on_submit(Message::HostForwardAdd)
-                            .font(Font::MONOSPACE)
-                            .size(12)
-                            .padding([6, 10])
-                            .style(input_style),
-                        btn(tr("추가"), Btn::Plain, Some(Message::HostForwardAdd)),
-                    ]
-                    .spacing(8),
+                    container(
+                        column![
+                            crate::ui_tunnel::builder(&ed.tunnel),
+                            row![Space::new().width(Length::Fill), btn(tr("+ 터널 추가"), Btn::Plain, ready.then_some(Message::TunnelAdd))],
+                        ]
+                        .spacing(8),
+                    )
+                    .padding(10)
+                    .style(|_| container::Style {
+                        border: Border { color: theme::LINE_2, width: 1.0, radius: crate::ui::R_CARD.into() },
+                        ..Default::default()
+                    }),
                 );
                 col = col.push(fw);
             }
         }
     }
 
+    let mut col = column![container(scrollable(container(col).padding(Padding::ZERO.right(12.0)))).max_height(EDITOR_BODY_MAX_H)].spacing(10);
     if let Some(e) = &ed.error {
         col = col.push(text(e.clone()).size(11.5).color(theme::ERR_TX));
     }
@@ -290,7 +296,7 @@ pub fn attach_confirm<'a>(app: &'a CoShell, tab_name: &'a str, a: &'a Attachment
             .width(Length::Fill)
             .style(|_| container::Style {
                 background: Some(Background::Color(alpha(theme::WARN, 0.08))),
-                border: Border { color: alpha(theme::WARN, 0.35), width: 1.0, radius: 7.0.into() },
+                border: Border { color: alpha(theme::WARN, 0.35), width: 1.0, radius: crate::ui::R_CONTROL.into() },
                 ..Default::default()
             }),
             muted(tf("{0} · 마스킹 {1}건", &[&a.label, &a.secrets])),
