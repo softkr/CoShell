@@ -1,5 +1,8 @@
 //! CoShell — terminal (iced) with local shells and SSH jump-chain sessions.
 
+// Windows release builds are a GUI app: no console window next to it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod ai;
 mod app;
 mod assist;
@@ -63,7 +66,7 @@ fn main() -> iced::Result {
     let warning = broken.map(|e| i18n::tf("설정 읽기 실패: {0}", &[&e]));
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
+    let user = login_user();
     let launch = match launch::parse(&args, &user, coshell_ssh::ConnectOptions::default_known_hosts()) {
         Ok(l) => l,
         Err(e) => {
@@ -93,4 +96,9 @@ fn main() -> iced::Result {
     // anything transparent, so it must be ours rather than the stock grey.
     .style(|_: &CoShell, _: &iced::Theme| iced::theme::Style { background_color: theme::BG_1, text_color: theme::TEXT })
     .run()
+}
+
+/// The local account name (`USER` on macOS/Linux, `USERNAME` on Windows): the default SSH user.
+pub(crate) fn login_user() -> String {
+    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "root".into())
 }

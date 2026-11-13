@@ -586,7 +586,7 @@ fn app_opts(known_hosts: PathBuf) -> ConnectOptions {
 
 impl CoShell {
     pub fn boot(launch: Launch, prefs: Settings, settings_path: Option<PathBuf>, prefs_warning: Option<String>) -> (Self, Task<Message>) {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let home = std::env::home_dir().unwrap_or_default();
         let mut warnings: Vec<String> = prefs_warning.into_iter().collect();
         let user_config = match std::fs::read_to_string(home.join(".ssh").join("config")) {
             Ok(t) => t,
@@ -613,7 +613,7 @@ impl CoShell {
             store,
             hosts_path,
             ai,
-            std::env::var("USER").unwrap_or_else(|_| "root".into()),
+            crate::login_user(),
             ConnectOptions::default_known_hosts(),
             Arc::new(Keychain(PASSWORD_SERVICE)),
         );
@@ -1129,7 +1129,7 @@ impl CoShell {
         };
         self.tabs.push(Tab {
             id,
-            name: "zsh".into(),
+            name: coshell_term::local_shell_name(),
             env: Env::None,
             phase,
             route: vec![],

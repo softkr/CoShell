@@ -182,7 +182,7 @@ impl HostStore {
     pub fn default_path() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+            .or_else(|| std::env::home_dir().map(|h| h.join(".config")))?;
         Some(base.join("coshell").join("hosts.toml"))
     }
 

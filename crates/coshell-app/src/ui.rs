@@ -472,7 +472,7 @@ fn status_bar(app: &CoShell) -> El<'_> {
             items.push(env_tag(t.env));
             items.push(small(state.into(), theme::TEXT_2).into());
             if t.is_local() {
-                items.push(mono("zsh", 11.0, theme::TEXT_3));
+                items.push(mono(coshell_term::local_shell_name(), 11.0, theme::TEXT_3));
             } else {
                 let total: std::time::Duration =
                     t.steps.iter().filter_map(|s| if let Step::Done(d) = s { Some(*d) } else { None }).sum();

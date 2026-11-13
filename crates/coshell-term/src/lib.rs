@@ -17,7 +17,7 @@ use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 pub use alacritty_terminal;
-pub use local::LocalPty;
+pub use local::{LocalPty, local_shell_name};
 
 /// Scrollback lines kept per session.
 const SCROLLBACK_LINES: usize = 10_000;

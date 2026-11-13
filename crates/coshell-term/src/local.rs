@@ -25,6 +25,16 @@ fn pty_size(size: GridSize) -> PtySize {
     }
 }
 
+/// Name of the shell a local tab runs (`zsh`, `bash`, `cmd` …) for tab titles and the status bar.
+pub fn local_shell_name() -> String {
+    // What `CommandBuilder::new_default_prog` starts: $SHELL on Unix, %COMSPEC% on Windows.
+    let var = if cfg!(windows) { "COMSPEC" } else { "SHELL" };
+    std::env::var_os(var)
+        .and_then(|p| std::path::Path::new(&p).file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| if cfg!(windows) { "cmd".into() } else { "sh".into() })
+}
+
 impl LocalPty {
     /// Spawn `$SHELL` (login shell) and return the transport plus its output reader.
     pub fn spawn(size: GridSize) -> anyhow::Result<(Self, Box<dyn Read + Send>)> {
@@ -37,7 +47,7 @@ impl LocalPty {
         if std::env::var_os("LANG").is_none() {
             cmd.env("LANG", FALLBACK_LANG);
         }
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = std::env::home_dir() {
             cmd.cwd(home);
         }
 

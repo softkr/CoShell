@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "coshell-ai"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "futures",
  "keyring",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "coshell-app"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "coshell-ai",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "coshell-ssh"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "coshell-term",
  "russh",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "coshell-term"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
