@@ -5,12 +5,17 @@
 //! takes the composing text out of the input-method request (so the runtime
 //! draws nothing) and draws it itself as plain text at the cursor, the way
 //! native macOS fields show it.
+//!
+//! It also commits the composing text when the caret leaves it (click, arrow
+//! keys, Tab, Enter, Esc, window losing focus): iced would otherwise drop the
+//! last, still-composing syllable.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::text::{self, Paragraph as _, Renderer as _};
 use iced::advanced::widget::{self, Tree, Widget};
-use iced::advanced::{Clipboard, InputMethod, Shell, mouse};
+use iced::advanced::{Clipboard, InputMethod, Shell, input_method, mouse};
+use iced::keyboard::{self, key::Named};
 use iced::{Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Theme, window};
 
 type Renderer = iced::Renderer;
@@ -18,6 +23,8 @@ type Paragraph = <Renderer as text::Renderer>::Paragraph;
 
 /// Width of the caret drawn after the composing text.
 const CARET_W: f32 = 1.0;
+/// A commit from the system this soon after we committed the same text ourselves is the same syllable.
+const DUPLICATE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub struct Ime<'a, Message> {
     content: Element<'a, Message, Theme, Renderer>,
@@ -45,6 +52,30 @@ impl<'a, Message> Ime<'a, Message> {
 struct State {
     /// (text being composed, where the cursor is, text size)
     composing: Option<(String, Rectangle, Option<Pixels>)>,
+    /// What we committed on the user's behalf, and when.
+    committed: Option<(String, std::time::Instant)>,
+}
+
+/// Moves the caret or the focus away from the composing text.
+fn ends_composition(event: &Event) -> bool {
+    match event {
+        Event::Mouse(mouse::Event::ButtonPressed(_)) | Event::Window(window::Event::Unfocused) => true,
+        Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(k), .. }) => matches!(
+            k,
+            Named::ArrowLeft
+                | Named::ArrowRight
+                | Named::ArrowUp
+                | Named::ArrowDown
+                | Named::Home
+                | Named::End
+                | Named::PageUp
+                | Named::PageDown
+                | Named::Tab
+                | Named::Enter
+                | Named::Escape
+        ),
+        _ => false,
+    }
 }
 
 impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
@@ -78,9 +109,36 @@ impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
         let state = tree.state.downcast_mut::<State>();
         let was = state.composing.is_some();
+        if let Event::InputMethod(input_method::Event::Commit(text)) = event
+            && let Some((done, at)) = state.committed.take()
+            && done == *text
+            && at.elapsed() < DUPLICATE_WINDOW
+        {
+            shell.capture_event(); // the system committing what we already inserted
+            return;
+        }
+        if ends_composition(event)
+            && let Some((text, ..)) = state.composing.take()
+        {
+            // Into the focused field first, then let the click / key move the caret. A shell of its
+            // own: the field marks the commit as handled, which must not swallow the click itself.
+            let mut messages = Vec::new();
+            {
+                let mut side = Shell::new(&mut messages);
+                for e in [input_method::Event::Commit(text.clone()), input_method::Event::Preedit(String::new(), None)] {
+                    self.content.as_widget_mut().update(&mut tree.children[0], &Event::InputMethod(e), layout, cursor, renderer, clipboard, &mut side, viewport);
+                }
+            }
+            for m in messages {
+                shell.publish(m);
+            }
+            shell.request_redraw();
+            tree.state.downcast_mut::<State>().committed = Some((text, std::time::Instant::now()));
+        }
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
+        let state = tree.state.downcast_mut::<State>();
         match shell.input_method_mut() {
             InputMethod::Enabled { cursor, preedit, .. } => {
                 // Keep it for drawing; the runtime overlay is not wanted.

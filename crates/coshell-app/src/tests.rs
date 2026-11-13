@@ -1716,3 +1716,41 @@ fn new_release_is_offered_in_the_status_bar() {
     assert!(app.update.is_none());
     assert!(simulator(ui::view(&app)).find("⬆ 9.0.0 업데이트").is_err());
 }
+
+#[test]
+fn composing_syllable_is_kept_when_the_caret_moves_away() {
+    use iced::advanced::input_method::Event as Ime;
+    use iced::keyboard::key::Named;
+    let mut app = app();
+    let id = quiet_tab(&mut app);
+    let draft = |app: &CoShell| app.tabs.iter().find(|t| t.id == id).unwrap().chat.draft.text().trim_end().to_string();
+    // "한국" committed, "어" still composing, then something moves the caret.
+    let typing = |last: iced::Event| {
+        vec![
+            iced::Event::InputMethod(Ime::Opened),
+            iced::Event::InputMethod(Ime::Commit("한국".into())),
+            iced::Event::InputMethod(Ime::Preedit("어".into(), None)),
+            iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())),
+            last,
+        ]
+    };
+    for (what, last, os_also_commits) in [
+        ("arrow key", iced_test::simulator::press_key(Named::ArrowLeft, None), true),
+        ("click elsewhere", iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)), false),
+    ] {
+        let _ = app.update(Message::AiNewChat(id));
+        let mut ui = simulator(ui::view(&app));
+        ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+        let mut events = typing(last);
+        if os_also_commits {
+            // Some input methods commit the syllable themselves right after: it must not double.
+            events.push(iced::Event::InputMethod(Ime::Commit("어".into())));
+        }
+        let _ = ui.simulate(events);
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        for m in msgs {
+            let _ = app.update(m);
+        }
+        assert_eq!(draft(&app), "한국어", "{what}");
+    }
+}
