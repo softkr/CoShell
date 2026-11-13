@@ -144,7 +144,7 @@ async fn auto(
     identity: Option<&Path>,
     passphrase: Option<Zeroizing<String>>,
 ) -> Result<Outcome, SshError> {
-    if std::env::var_os("SSH_AUTH_SOCK").is_some()
+    if agent_available()
         && let Ok(Some(Outcome::Success)) = agent(handle, cx).await
     {
         return Ok(Outcome::Success);
@@ -194,10 +194,24 @@ async fn publickey(handle: &mut Handle, cx: &Ctx<'_>, key: PrivateKey) -> Result
         .into())
 }
 
+/// Windows' built-in OpenSSH agent service.
+#[cfg(windows)]
+const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// Whether to ask an agent: `SSH_AUTH_SOCK` on Unix; on Windows the OpenSSH agent
+/// pipe is simply tried (it fails fast when the service is not running).
+fn agent_available() -> bool {
+    cfg!(windows) || std::env::var_os("SSH_AUTH_SOCK").is_some()
+}
+
 /// Try every agent identity. `None` when the agent had no usable identity.
 async fn agent(handle: &mut Handle, cx: &Ctx<'_>) -> Result<Option<Outcome>, SshError> {
     let agent_err = |e: russh::keys::Error| SshError::Agent { hop: cx.label.clone(), reason: e.to_string() };
-    let mut agent = AgentClient::connect_env().await.map_err(agent_err)?;
+    #[cfg(unix)]
+    let client = AgentClient::connect_env().await;
+    #[cfg(windows)]
+    let client = AgentClient::connect_named_pipe(WINDOWS_AGENT_PIPE).await;
+    let mut agent = client.map_err(agent_err)?;
     let identities = agent.request_identities().await.map_err(agent_err)?;
     let rsa_hash = handle.best_supported_rsa_hash().await.map_err(cx.ssh())?.flatten();
     let mut last = None;
