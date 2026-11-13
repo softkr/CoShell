@@ -86,6 +86,57 @@ impl EventListener for Listener {
 
 pub type SharedTerm = Arc<FairMutex<Term<Listener>>>;
 
+/// The last `max_rows` rows with text (screen + scrollback) as lines, oldest first.
+/// Rows the terminal wrapped are joined back into one line; the blank screen
+/// area below the last text is skipped.
+pub fn logical_lines(term: &SharedTerm, max_rows: usize) -> Vec<String> {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::cell::Flags;
+
+    let term = term.lock();
+    let grid = term.grid();
+    let top = -(grid.history_size() as i32);
+    let bottom = grid.screen_lines() as i32 - 1;
+    let last_col = Column(grid.columns().saturating_sub(1));
+    // (text, continues on the next row)
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for l in (top..=bottom).rev() {
+        let row = &grid[Line(l)];
+        let text: String = (0..grid.columns())
+            .map(|c| &row[Column(c)])
+            .filter(|cell| !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER))
+            .map(|cell| cell.c)
+            .collect();
+        if rows.is_empty() && text.trim().is_empty() {
+            continue; // blank screen area below the last text does not count
+        }
+        rows.push((text, row[last_col].flags.contains(Flags::WRAPLINE)));
+        if rows.len() == max_rows {
+            break;
+        }
+    }
+    rows.reverse();
+    let mut lines: Vec<String> = Vec::new();
+    let mut joining = false;
+    for (text, wraps) in rows {
+        match lines.last_mut() {
+            Some(prev) if joining => prev.push_str(&text),
+            _ => lines.push(text),
+        }
+        if !wraps {
+            if let Some(l) = lines.last_mut() {
+                *l = l.trim_end().to_string();
+            }
+        }
+        joining = wraps;
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
 /// One terminal session: emulator state + transport.
 pub struct Session {
     term: SharedTerm,

@@ -7,6 +7,8 @@ mod conn;
 mod hosts;
 mod i18n;
 mod icons;
+mod ime;
+mod keys;
 mod launch;
 #[cfg(target_os = "macos")]
 mod menu;
@@ -16,6 +18,7 @@ mod theme;
 mod ui;
 mod ui_ai;
 mod ui_hosts;
+mod ui_keys;
 mod ui_servers;
 mod ui_settings;
 mod ui_tunnel;
@@ -85,5 +88,8 @@ fn main() -> iced::Result {
     .subscription(CoShell::subscription)
     .window(window_settings(window))
     .theme(|_: &CoShell| iced::Theme::Dark)
+    // The window background and default text colour: also what shows behind
+    // anything transparent, so it must be ours rather than the stock grey.
+    .style(|_: &CoShell, _: &iced::Theme| iced::theme::Style { background_color: theme::BG_1, text_color: theme::TEXT })
     .run()
 }

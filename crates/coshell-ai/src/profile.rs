@@ -39,13 +39,109 @@ impl Format {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
     pub name: String,
     pub format: Format,
     pub base_url: String,
     pub model: String,
+    /// Proxies and compatible services: paths, auth, headers, parameters.
+    #[serde(default, skip_serializing_if = "Advanced::is_default")]
+    pub advanced: Advanced,
+}
+
+/// How the API key is sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthStyle {
+    /// Anthropic: `x-api-key`; OpenAI: `Authorization: Bearer`.
+    #[default]
+    Auto,
+    Bearer,
+    /// A header named in `auth_header` (e.g. Azure's `api-key`).
+    Header,
+    /// Never sent.
+    None,
+}
+
+impl AuthStyle {
+    pub const ALL: [AuthStyle; 4] = [AuthStyle::Auto, AuthStyle::Bearer, AuthStyle::Header, AuthStyle::None];
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
+    pub name: String,
+    pub value: String,
+}
+
+/// Optional per-profile overrides. Empty / `None` = the format's standard behaviour.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Advanced {
+    /// Chat path after the base URL (`/v1/messages` …), or a full URL.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub chat_path: String,
+    /// Model list path after the base URL (`/v1/models`), or a full URL.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub models_path: String,
+    #[serde(skip_serializing_if = "is_auto")]
+    pub auth: AuthStyle,
+    /// Header for `AuthStyle::Header`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub auth_header: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<Header>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// `anthropic-version` header (Anthropic format).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub anthropic_version: String,
+    /// JSON object merged into every chat request body (e.g. `{"top_p": 0.9}`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub extra_body: String,
+}
+
+fn is_auto(a: &AuthStyle) -> bool {
+    *a == AuthStyle::Auto
+}
+
+fn token_ok(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+impl Advanced {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Problems that would make every request fail.
+    pub fn check(&self) -> Result<(), String> {
+        let en = crate::english();
+        for h in &self.headers {
+            if !token_ok(&h.name) || h.value.contains(['\r', '\n']) {
+                return Err(if en { format!("Invalid header: {}", h.name) } else { format!("잘못된 헤더입니다: {}", h.name) });
+            }
+        }
+        if self.auth == AuthStyle::Header && !token_ok(self.auth_header.trim()) {
+            return Err(if en { "Enter the header name for the key".into() } else { "키를 보낼 헤더 이름을 입력하세요".into() });
+        }
+        if self.temperature.is_some_and(|t| !(0.0..=2.0).contains(&t)) {
+            return Err(if en { "Temperature must be 0–2".into() } else { "temperature는 0–2 사이여야 합니다".into() });
+        }
+        if self.max_tokens == Some(0) {
+            return Err(if en { "Max tokens must be above 0".into() } else { "최대 토큰은 1 이상이어야 합니다".into() });
+        }
+        if !self.extra_body.trim().is_empty() {
+            match serde_json::from_str::<serde_json::Value>(&self.extra_body) {
+                Ok(serde_json::Value::Object(_)) => {}
+                _ => return Err(if en { "Extra JSON must be an object: {…}".into() } else { "추가 JSON은 {…} 형태의 객체여야 합니다".into() }),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Profile {
@@ -56,7 +152,7 @@ impl Profile {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProfileStore {
     pub active: String,
     pub profiles: Vec<Profile>,
@@ -70,6 +166,7 @@ impl Default for ProfileStore {
             format,
             base_url: base.into(),
             model: model.into(),
+            advanced: Advanced::default(),
         };
         Self {
             active: "claude".into(),

@@ -1,17 +1,18 @@
-//! Settings dialog (⌘,): terminal look, behaviour and the shortcut reference.
+//! Settings dialog (⌘,): general (terminal look, behaviour, shortcuts), servers and AI pages.
 
 use crate::i18n::{tf, tr};
 use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length};
 
-use crate::app::{Message, SettingsDraft};
+use crate::app::{CoShell, Message, SettingsDraft, SettingsTab};
 use crate::settings::{self, CursorKind, Language, Scheme};
 use crate::theme::{self, alpha};
 use crate::ui::{Btn, El, btn, card_style, input_style, mono, muted};
 
-const DIALOG_W: f32 = 600.0;
-/// The form scrolls beyond this, so the title and the buttons always stay visible.
-const FORM_MAX_H: f32 = 460.0;
+const DIALOG_W: f32 = 880.0;
+/// Pages scroll inside this, so the title and the buttons always stay visible.
+const PAGE_H: f32 = 500.0;
+const NAV_W: f32 = 130.0;
 const NUMBER_W: f32 = 120.0;
 const SHORTCUT_KEYS_W: f32 = 108.0;
 
@@ -52,7 +53,7 @@ fn segment<'a, T: Copy + PartialEq + 'a>(all: &[T], current: T, name: fn(T) -> &
             .style(move |_, _| button::Style {
                 background: Some(Background::Color(if on { theme::BG_3 } else { Color::TRANSPARENT })),
                 text_color: theme::TEXT,
-                border: Border { color: if on { alpha(theme::ACCENT, 0.7) } else { theme::LINE_2 }, width: 1.0, radius: 6.0.into() },
+                border: Border { color: if on { alpha(theme::ACCENT, 0.7) } else { theme::LINE_2 }, width: 1.0, radius: crate::ui::R_CONTROL.into() },
                 ..Default::default()
             })
             .into()
@@ -86,7 +87,68 @@ fn shortcuts<'a>() -> El<'a> {
     column(rows.collect::<Vec<El<'a>>>()).spacing(5).into()
 }
 
-pub fn dialog(d: &SettingsDraft) -> El<'_> {
+fn nav<'a>(current: SettingsTab) -> El<'a> {
+    let item = |tab: SettingsTab, name: &'a str| -> El<'a> {
+        let on = tab == current;
+        button(text(name).size(12.5).color(if on { theme::TEXT } else { theme::TEXT_2 }))
+            .width(Length::Fill)
+            .padding([7, 10])
+            .on_press(Message::SettingsTab(tab))
+            .style(move |_, status| button::Style {
+                background: Some(Background::Color(if on {
+                    theme::BG_3
+                } else if matches!(status, button::Status::Hovered) {
+                    theme::BG_2
+                } else {
+                    Color::TRANSPARENT
+                })),
+                text_color: theme::TEXT,
+                border: Border { radius: crate::ui::R_CONTROL.into(), ..Default::default() },
+                ..Default::default()
+            })
+            .into()
+    };
+    column![
+        item(SettingsTab::General, tr("일반")),
+        item(SettingsTab::Servers, tr("서버")),
+        item(SettingsTab::Keys, tr("SSH 키")),
+        item(SettingsTab::Ai, "AI"),
+    ]
+        .spacing(4)
+        .width(NAV_W)
+        .into()
+}
+
+pub fn dialog<'a>(app: &'a CoShell, d: &'a SettingsDraft) -> El<'a> {
+    let page: El<'a> = match d.tab {
+        SettingsTab::General => scrollable(container(general(d)).padding([0, 12])).height(Length::Fill).into(),
+        SettingsTab::Servers => crate::ui_servers::manage(app),
+        SettingsTab::Keys => crate::ui_keys::page(app),
+        SettingsTab::Ai => match &app.ai.settings {
+            Some(s) => crate::ui_ai::settings_page(s),
+            None => Space::new().into(),
+        },
+    };
+    let rule = container(Space::new()).width(1).height(Length::Fill).style(|_| container::Style {
+        background: Some(Background::Color(theme::LINE)),
+        ..Default::default()
+    });
+    let mut col = column![text(tr("설정")).size(14), row![nav(d.tab), rule, container(page).width(Length::Fill)].spacing(14).height(PAGE_H)].spacing(12);
+    if let Some(e) = &d.error {
+        col = col.push(text(e.clone()).size(11.5).color(theme::ERR_TX));
+    }
+    col = col.push(
+        row![
+            Space::new().width(Length::Fill),
+            btn(tr("취소"), Btn::Ghost, Some(Message::SettingsClose)),
+            btn(tr("저장"), Btn::Primary, Some(Message::SettingsSave)),
+        ]
+        .spacing(8),
+    );
+    container(col).padding(18).width(DIALOG_W).style(card_style(theme::LINE_2)).into()
+}
+
+fn general(d: &SettingsDraft) -> El<'_> {
     let s = &d.s;
     let font_size = row![
         btn("−", Btn::Plain, (s.font_size > settings::FONT_SIZE_MIN).then_some(Message::SettingsFontSize(-1))),
@@ -96,7 +158,7 @@ pub fn dialog(d: &SettingsDraft) -> El<'_> {
     .spacing(6)
     .align_y(Alignment::Center);
 
-    let form = column![
+    column![
         section(tr("언어")),
         segment(&Language::ALL, s.language, Language::label, Message::SettingsLanguage),
         muted(tr("메뉴 막대는 앱을 다시 시작한 뒤 바뀝니다.")),
@@ -137,19 +199,6 @@ pub fn dialog(d: &SettingsDraft) -> El<'_> {
         section(tr("단축키")),
         shortcuts(),
     ]
-    .spacing(6);
-
-    let mut col = column![text(tr("설정")).size(14), container(scrollable(container(form).padding([0, 12]))).max_height(FORM_MAX_H)].spacing(12);
-    if let Some(e) = &d.error {
-        col = col.push(text(e.clone()).size(11.5).color(theme::ERR_TX));
-    }
-    col = col.push(
-        row![
-            Space::new().width(Length::Fill),
-            btn(tr("취소"), Btn::Ghost, Some(Message::SettingsClose)),
-            btn(tr("저장"), Btn::Primary, Some(Message::SettingsSave)),
-        ]
-        .spacing(8),
-    );
-    container(col).padding(18).width(DIALOG_W).style(card_style(theme::LINE_2)).into()
+    .spacing(6)
+    .into()
 }

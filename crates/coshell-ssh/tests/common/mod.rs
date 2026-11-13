@@ -171,6 +171,17 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
+    /// `exec`: echoes the command, one stderr line, exit status 7.
+    async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut ServerSession) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        session.data(channel, format!("ran: {}\n", String::from_utf8_lossy(data)).into_bytes())?;
+        session.extended_data(channel, 1, b"warning on stderr\n".to_vec())?;
+        session.exit_status_request(channel, 7)?;
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
     async fn shell_request(&mut self, channel: ChannelId, session: &mut ServerSession) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         session.data(channel, "welcome 한글\r\n".as_bytes().to_vec())?;

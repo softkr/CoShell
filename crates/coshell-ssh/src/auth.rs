@@ -93,7 +93,7 @@ pub(crate) async fn authenticate(
         }
         Auth::Agent => agent(handle, &cx).await?.unwrap_or(Outcome::Failure { remaining: vec![], partial: false }),
         Auth::Interactive => handle.authenticate_none(&user).await.map_err(cx.ssh())?.into(),
-        Auth::Auto { identity, .. } => auto(handle, &cx, identity.as_deref()).await?,
+        Auth::Auto { identity, passphrase, .. } => auto(handle, &cx, identity.as_deref(), passphrase.clone()).await?,
     };
 
     let may_prompt = matches!(hop.auth, Auth::Interactive | Auth::Auto { .. });
@@ -138,7 +138,12 @@ pub(crate) async fn authenticate(
 }
 
 /// Agent → configured/default key files → (prompts handled by caller).
-async fn auto(handle: &mut Handle, cx: &Ctx<'_>, identity: Option<&Path>) -> Result<Outcome, SshError> {
+async fn auto(
+    handle: &mut Handle,
+    cx: &Ctx<'_>,
+    identity: Option<&Path>,
+    passphrase: Option<Zeroizing<String>>,
+) -> Result<Outcome, SshError> {
     if std::env::var_os("SSH_AUTH_SOCK").is_some()
         && let Ok(Some(Outcome::Success)) = agent(handle, cx).await
     {
@@ -151,7 +156,9 @@ async fn auto(handle: &mut Handle, cx: &Ctx<'_>, identity: Option<&Path>) -> Res
             .unwrap_or_default(),
     };
     for path in candidates {
-        if let Ok(key) = load_key(cx, &path, None).await
+        // The saved passphrase belongs to the configured key, not to the defaults.
+        let pass = if identity.is_some() { passphrase.clone() } else { None };
+        if let Ok(key) = load_key(cx, &path, pass).await
             && let Outcome::Success = publickey(handle, cx, key).await?
         {
             return Ok(Outcome::Success);

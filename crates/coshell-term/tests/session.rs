@@ -154,3 +154,20 @@ fn configure_applies_scrollback_and_cursor_shape() {
     assert_eq!(term.grid().history_size(), 5);
     assert_eq!(term.renderable_content().cursor.shape, CursorShape::Beam);
 }
+
+#[test]
+fn logical_lines_join_wrapped_rows() {
+    let size = GridSize { cols: 10, rows: 5, ..GridSize::DEFAULT };
+    let cap = Arc::new(Capture::default());
+    let s = Session::new(cap, Box::new(Cursor::new(&b"$ echo 0123456789abcdef\r\nok\r\n$ "[..])), size);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let lines = coshell_term::logical_lines(s.term(), 50);
+        if lines.last().map(String::as_str) == Some("$") || Instant::now() > deadline {
+            assert_eq!(lines, ["$ echo 0123456789abcdef", "ok", "$"]);
+            assert_eq!(coshell_term::logical_lines(s.term(), 1), ["$"], "blank rows below do not count");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

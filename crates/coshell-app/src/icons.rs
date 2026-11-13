@@ -22,6 +22,16 @@ svg_handle!(AI_SPARK, "features/ai-spark.svg");
 svg_handle!(PORT_FORWARDING, "features/port-forwarding.svg");
 svg_handle!(SAFE_GUARD, "features/safe-guard.svg");
 svg_handle!(API_BRIDGE, "features/api-bridge.svg");
+// Symbolic UI icons (drawn black, tinted where used).
+svg_handle!(NEW_CHAT, "icons/new-chat.svg");
+svg_handle!(PAPERCLIP, "icons/paperclip.svg");
+svg_handle!(SEND, "icons/send.svg");
+svg_handle!(STOP, "icons/stop.svg");
+svg_handle!(COPY, "icons/copy.svg");
+svg_handle!(KEY, "icons/key.svg");
+svg_handle!(PLAY, "icons/play.svg");
+svg_handle!(ZAP, "icons/zap.svg");
+svg_handle!(TRASH, "icons/trash.svg");
 
 /// 256px PNG for the window / taskbar icon (Windows, Linux; macOS uses the bundle's .icns).
 const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");
@@ -29,6 +39,15 @@ const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");
 /// A square icon element.
 pub fn icon<'a, Message: 'a>(handle: &LazyLock<Handle>, size: f32) -> Element<'a, Message> {
     svg::Svg::new(LazyLock::force(handle).clone()).width(Length::Fixed(size)).height(Length::Fixed(size)).into()
+}
+
+/// A symbolic icon drawn in `color`.
+pub fn tinted<'a, Message: 'a>(handle: &LazyLock<Handle>, size: f32, color: iced::Color) -> Element<'a, Message> {
+    svg::Svg::new(LazyLock::force(handle).clone())
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_, _| svg::Style { color: Some(color) })
+        .into()
 }
 
 pub fn window_icon() -> Option<iced::window::Icon> {

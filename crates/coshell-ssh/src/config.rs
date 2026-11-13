@@ -190,7 +190,7 @@ impl SshConfig {
             host: e.host().to_string(),
             port: port.or(e.port).unwrap_or(DEFAULT_PORT),
             user: user.or(e.user.clone()).unwrap_or_else(|| default_user.to_string()),
-            auth: Auth::Auto { identity: e.identity_file.clone(), password: None },
+            auth: Auth::Auto { identity: e.identity_file.clone(), password: None, passphrase: None },
         });
         Ok(chain)
     }

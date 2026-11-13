@@ -34,15 +34,6 @@ impl Env {
             Env::None => tr("없음"),
         }
     }
-
-    /// Banner text on the terminal frame (prod/stage only).
-    pub fn corner(self) -> Option<&'static str> {
-        match self {
-            Env::Prod => Some("PRODUCTION"),
-            Env::Stage => Some("STAGING"),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,57 +76,6 @@ fn label(field: &str, v: &str) -> Result<(), String> {
         return Err(tf("{0}: 비어 있거나 제어 문자가 있습니다", &[&field]));
     }
     Ok(())
-}
-
-/// What an `ssh …` command line (or `user@host:port`) says about a host.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct SshCommand {
-    pub user: Option<String>,
-    pub host: String,
-    pub port: Option<u16>,
-    pub identity_file: Option<String>,
-    pub proxy_jump: Option<String>,
-}
-
-/// Parse `ssh [-p PORT] [-i KEY] [-J JUMP] [-l USER] [user@]host[:port]`
-/// (the leading `ssh` is optional). Unknown flags are rejected.
-pub fn parse_ssh_command(s: &str) -> Result<SshCommand, String> {
-    let mut words = s.split_whitespace().peekable();
-    if words.peek() == Some(&"ssh") {
-        words.next();
-    }
-    let mut c = SshCommand::default();
-    let mut target: Option<&str> = None;
-    let port = |v: Option<&str>| -> Result<u16, String> {
-        v.and_then(|p| p.parse::<u16>().ok()).filter(|p| *p != 0).ok_or_else(|| tr("포트는 1–65535 사이의 숫자로 입력하세요").to_string())
-    };
-    while let Some(w) = words.next() {
-        match w {
-            "-p" => c.port = Some(port(words.next())?),
-            "-i" => c.identity_file = Some(words.next().ok_or(tr("-i 다음에 키 파일이 필요합니다"))?.to_string()),
-            "-J" => c.proxy_jump = Some(words.next().ok_or(tr("-J 다음에 경유 서버가 필요합니다"))?.to_string()),
-            "-l" => c.user = Some(words.next().ok_or(tr("-l 다음에 사용자가 필요합니다"))?.to_string()),
-            f if f.starts_with('-') => return Err(tf("지원하지 않는 옵션입니다: {0}", &[&f])),
-            t if target.is_none() => target = Some(t),
-            extra => return Err(tf("원격 명령은 저장할 수 없습니다: {0}", &[&extra])),
-        }
-    }
-    let t = target.ok_or(tr("접속 대상(user@host)이 없습니다"))?;
-    let (user, rest) = match t.split_once('@') {
-        Some((u, r)) => (Some(u.to_string()), r),
-        None => (None, t),
-    };
-    let (host, p) = match rest.rsplit_once(':') {
-        Some((h, p)) if !h.contains(':') => (h, Some(port(Some(p))?)),
-        _ => (rest, None),
-    };
-    if host.is_empty() {
-        return Err(tr("서버 주소가 없습니다").into());
-    }
-    c.user = c.user.or(user);
-    c.host = host.to_string();
-    c.port = c.port.or(p);
-    Ok(c)
 }
 
 /// ASCII alias from a display name ("jumphost 서버" → "jumphost").
@@ -345,25 +285,6 @@ mod tests {
         assert_eq!(got, [("ec2-user", "13.124.88.12"), ("ubuntu", "10.0.1.42")]);
         assert_eq!(cfg.entry("prod-web").forwards, [ForwardSpec::parse('L', "8080:127.0.0.1:80").unwrap()]);
         assert_eq!(cfg.aliases(), ["prod-web", "bastion"]);
-    }
-
-    #[test]
-    fn ssh_command_forms() {
-        let c = |s| parse_ssh_command(s).unwrap();
-        assert_eq!(c("ssh root@203.0.113.7:41"), SshCommand { user: Some("root".into()), host: "203.0.113.7".into(), port: Some(41), ..Default::default() });
-        assert_eq!(c("ssh -p 2222 -i ~/.ssh/k.pem ubuntu@198.51.100.4"), SshCommand {
-            user: Some("ubuntu".into()),
-            host: "198.51.100.4".into(),
-            port: Some(2222),
-            identity_file: Some("~/.ssh/k.pem".into()),
-            ..Default::default()
-        });
-        assert_eq!(c("pi@192.0.2.36").port, None);
-        assert_eq!(c("ssh -J jump -l admin db.internal").proxy_jump.as_deref(), Some("jump"));
-        assert!(parse_ssh_command("ssh -X host").is_err());
-        assert!(parse_ssh_command("ssh host uptime").is_err(), "remote commands are not hosts");
-        assert!(parse_ssh_command("ssh root@host:0").is_err());
-        assert!(parse_ssh_command("ssh").is_err());
     }
 
     #[test]

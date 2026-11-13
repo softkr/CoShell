@@ -19,8 +19,10 @@ iced.workspace = true
 unicode-width.workspace = true
 zeroize.workspace = true
 futures.workspace = true
+tokio.workspace = true
 anyhow.workspace = true
 sys-locale = "0.3.2"
+rfd = "0.15"
 
 [dev-dependencies]
 iced_test = "=0.14.0"
