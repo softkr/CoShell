@@ -41,7 +41,7 @@ const PROMPT_GRACE: Duration = Duration::from_secs(300);
 /// How to authenticate to one hop.
 #[derive(Clone)]
 pub enum Auth {
-    /// Keys held by ssh-agent (`SSH_AUTH_SOCK`).
+    /// Keys held by ssh-agent (`SSH_AUTH_SOCK`; on Windows the OpenSSH agent service).
     Agent,
     /// Private key file, optionally encrypted.
     KeyFile { path: PathBuf, passphrase: Option<Zeroizing<String>> },
