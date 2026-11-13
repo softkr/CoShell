@@ -67,6 +67,12 @@ pub fn parse_latest(v: &Value, current: &str) -> Option<Release> {
         .find(|a| !name.is_empty() && a["name"].as_str() == Some(hash_file.as_str()))
         .and_then(|a| a["browser_download_url"].as_str())
         .map(String::from);
+    let installable = asset.is_some() && (sha256_url.is_some() || notes_sha256(v["body"].as_str().unwrap_or_default(), name).is_some());
+    if cfg!(target_os = "macos") && !installable {
+        // Published before its DMG (or hash) is attached: still being built. Ask again later
+        // rather than offer an update that cannot be installed yet.
+        return None;
+    }
     Some(Release {
         sha256_url,
         page: v["html_url"].as_str().unwrap_or_default().to_string(),
@@ -233,6 +239,13 @@ mod tests {
                 {"name": "CoShell-0.5.0-macos-arm64.dmg.sha256", "browser_download_url": "https://example.com/m.dmg.sha256"},
             ],
         });
+        // Files still being built: not offered yet.
+        let mut building = ci.clone();
+        building["assets"] = serde_json::json!([]);
+        assert_eq!(parse_latest(&building, "0.4.1"), None);
+        let mut no_hash = ci.clone();
+        no_hash["assets"].as_array_mut().unwrap().pop();
+        assert_eq!(parse_latest(&no_hash, "0.4.1"), None, "a DMG without its hash is not ready either");
         let r = parse_latest(&ci, "0.4.1").unwrap();
         assert_eq!((r.dmg.as_deref(), r.sha256.as_deref()), (Some("https://example.com/m.dmg"), None));
         assert_eq!(r.sha256_url.as_deref(), Some("https://example.com/m.dmg.sha256"));

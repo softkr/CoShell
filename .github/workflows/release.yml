@@ -1,15 +1,18 @@
 # Release builds: macOS (Apple Silicon only, DMG), Windows (x64, zip), Linux (x86_64, tar.gz).
 # Every archive gets a `.sha256` file next to it; the app's updater checks the DMG against it.
 #
-# - Pull requests: build only, so a change that breaks Windows or Linux shows up before merging.
-# - Publishing a release: build and attach the archives (and their SHA-256) to it.
-# - Manual run: rebuild and re-attach for an existing release tag.
+# - Pull requests: build only, so a change that breaks a platform shows up before merging.
+# - Pushing a `v*` tag: build all three, then attach the files to that tag's release and only
+#   then publish it. Write the notes in a draft release for the tag meanwhile; without one, a
+#   release with generated notes is created. Never published without its files, so the in-app
+#   updater never sees a release it cannot install.
+# - Manual run: rebuild and re-attach for an existing tag.
 name: Release builds
 
 on:
   pull_request:
-  release:
-    types: [published]
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
@@ -20,7 +23,7 @@ permissions:
   contents: write
 
 env:
-  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
 
 jobs:
   build:
@@ -77,9 +80,8 @@ jobs:
         run: |
           dmg="$(scripts/package-dmg.sh | tail -1)"
           name="$(basename "$dmg")"
-          cp "$dmg" "$name"
-          shasum -a 256 "$name" > "$name.sha256"
-          echo "ASSETS=$name $name.sha256" >> "$GITHUB_ENV"
+          mkdir -p dist && cp "$dmg" "dist/$name"
+          (cd dist && shasum -a 256 "$name" > "$name.sha256")
 
       - name: Package (Windows)
         if: runner.os == 'Windows' && env.TAG != ''
@@ -90,9 +92,9 @@ jobs:
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item target/release/coshell.exe "$name/CoShell.exe"
           Copy-Item README.md, LICENSE $name
-          Compress-Archive -Path $name -DestinationPath "$name.zip"
-          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
-          "ASSETS=$name.zip $name.zip.sha256" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -Path $name -DestinationPath "dist/$name.zip"
+          (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
 
       - name: Package (Linux)
         if: runner.os == 'Linux' && env.TAG != ''
@@ -104,13 +106,38 @@ jobs:
           cp packaging/linux/coshell.desktop "$name/"
           cp crates/coshell-app/assets/png/coshell-256.png "$name/coshell.png"
           cp README.md LICENSE "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          echo "ASSETS=$name.tar.gz $name.tar.gz.sha256" >> "$GITHUB_ENV"
+          mkdir -p dist
+          tar -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 
-      - name: Attach to the release
+      - name: Keep the files for publishing
         if: env.TAG != ''
-        shell: bash
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach the files, then publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" $ASSETS --clobber
+          REPO: ${{ github.repository }}
+        run: |
+          ls -la dist
+          if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* -R "$REPO" --clobber
+            gh release edit "$TAG" -R "$REPO" --draft=false
+          else
+            gh release create "$TAG" dist/* -R "$REPO" --title "CoShell ${TAG#v}" --generate-notes
+          fi
