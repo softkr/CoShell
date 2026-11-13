@@ -119,7 +119,7 @@ fn conversation(tab: &Tab, panel_w: f32) -> El<'_> {
         }
         col = col.push(match t.role {
             Role::User => user_turn(t, panel_w),
-            Role::Assistant => assistant_turn(tab, i, t, i == last && chat.is_streaming() && t.exec.is_none()),
+            Role::Assistant => assistant_turn(tab, i, t, i == last && chat.is_streaming() && t.execs.is_empty()),
         });
     }
     if let Some(e) = &chat.error {
@@ -298,9 +298,10 @@ fn prose<'a>(s: &str) -> El<'a> {
 }
 
 /// A command the assistant ran itself: one line, output on demand.
-fn exec_panel<'a>(tab: &'a Tab, index: usize, e: &'a Exec) -> El<'a> {
+fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a> {
     let (color, status) = match &e.state {
         ExecState::Running => (theme::ACCENT, tr("실행 중…").to_string()),
+        ExecState::Typed => (theme::TEXT_2, tr("터미널에 입력함").to_string()),
         ExecState::Done { exit: Some(0) | None, output, .. } => (theme::OK, tf("실행함 · {0}줄", &[&output.lines().count()])),
         ExecState::Done { exit: Some(code), .. } => (theme::WARN, tf("종료 코드 {0}", &[code])),
         ExecState::Failed(_) => (theme::ERR, tr("실행하지 못함").to_string()),
@@ -308,7 +309,7 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, e: &'a Exec) -> El<'a> {
     let one_line: String = e.cmd.lines().next().unwrap_or("").chars().take(70).collect();
     let head = button(
         row![
-            crate::icons::tinted(&ZAP, 12.0, color),
+            crate::icons::tinted(if e.manual { &PLAY } else { &ZAP }, 12.0, color),
             container(mono(one_line, 11.5, theme::TEXT)).width(Length::Fill).clip(true),
             text(status).size(10.5).color(color),
             text(if e.open { "▾" } else { "▸" }).size(11).color(theme::TEXT_3),
@@ -318,7 +319,7 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, e: &'a Exec) -> El<'a> {
     )
     .width(Length::Fill)
     .padding([7, 10])
-    .on_press(Message::AgentToggle(tab.id, index))
+    .on_press(Message::AgentToggle(tab.id, index, run))
     .style(|_, st| button::Style {
         background: Some(Background::Color(if matches!(st, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
         border: Border { radius: crate::ui::R_CONTROL.into(), ..Default::default() },
@@ -330,7 +331,7 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, e: &'a Exec) -> El<'a> {
             ExecState::Done { output, .. } if output.trim().is_empty() => tr("(출력 없음)").to_string(),
             ExecState::Done { output, .. } => output.clone(),
             ExecState::Failed(err) => err.clone(),
-            ExecState::Running => String::new(),
+            ExecState::Running | ExecState::Typed => String::new(),
         };
         col = col.push(
             container(scrollable(container(mono(body, 11.0, theme::TEXT_2)).padding(10)).height(Length::Shrink))
@@ -366,10 +367,14 @@ fn assistant_turn<'a>(tab: &'a Tab, index: usize, t: &'a Turn, streaming: bool) 
     for seg in assist::segments(&t.text) {
         col = col.push(match seg {
             Segment::Text(s) => prose(&s),
-            Segment::Code { code, .. } if t.exec.as_ref().is_some_and(|e| e.cmd == assist::command_text(&code)) => {
-                exec_panel(tab, index, t.exec.as_ref().expect("checked"))
+            Segment::Code { lang, code, closed } => {
+                // A command that was run shows its run (the latest) instead of a ▶ card.
+                let cmd = assist::command_text(&code);
+                match t.execs.iter().enumerate().rev().find(|(_, e)| e.cmd == cmd) {
+                    Some((j, e)) => exec_panel(tab, index, j, e),
+                    None => command_card(tab, index, lang, code, closed),
+                }
             }
-            Segment::Code { lang, code, closed } => command_card(tab, lang, code, closed),
         });
     }
     if streaming {
@@ -397,7 +402,7 @@ fn risk_badge<'a>(r: Risk) -> El<'a> {
         .into()
 }
 
-fn command_card<'a>(tab: &'a Tab, lang: String, code: String, closed: bool) -> El<'a> {
+fn command_card<'a>(tab: &'a Tab, index: usize, lang: String, code: String, closed: bool) -> El<'a> {
     let shell = assist::is_shell(&lang);
     let cmd = assist::command_text(&code);
     let r = assist::risk(&cmd);
@@ -428,7 +433,7 @@ fn command_card<'a>(tab: &'a Tab, lang: String, code: String, closed: bool) -> E
         warn,
         Space::new().width(Length::Fill),
         icon_btn(&COPY, tr("복사"), Btn::Ghost, Some(Message::AiCopy(cmd.clone()))),
-        run_button(tab, &cmd, can_run && !placeholder, multiline_blocked, placeholder),
+        run_button(tab, index, &cmd, can_run && !placeholder, multiline_blocked, placeholder),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -449,8 +454,13 @@ fn command_card<'a>(tab: &'a Tab, lang: String, code: String, closed: bool) -> E
 }
 
 /// Run = insert + Enter. A risky command first turns the button into "click again to run".
-fn run_button<'a>(tab: &'a Tab, cmd: &str, enabled: bool, multiline_blocked: bool, placeholder: bool) -> El<'a> {
-    let msg = enabled.then(|| Message::AiRun(tab.id, cmd.to_string()));
+fn run_button<'a>(tab: &'a Tab, index: usize, cmd: &str, enabled: bool, multiline_blocked: bool, placeholder: bool) -> El<'a> {
+    // While a reply is still coming in, or a command is running, there is nothing to press yet
+    // (the assistant may be about to run this very command).
+    if tab.chat.is_streaming() {
+        return Space::new().into();
+    }
+    let msg = enabled.then(|| Message::AiRun(tab.id, index, cmd.to_string()));
     if enabled && tab.chat.run_confirm.as_deref() == Some(cmd) {
         return container(btn(tr("한 번 더 눌러 실행"), Btn::Danger, msg)).id(RUN_BTN).into();
     }

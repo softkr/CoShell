@@ -45,7 +45,7 @@ fn ai_with(active: &str, keys: &[(&str, &str)]) -> Ai {
 }
 
 fn turn(role: Role, text: &str) -> Turn {
-    Turn { role, text: text.into(), sent: text.into(), attachment: None, model: "m".into(), stopped: false, exec: None, hidden: false }
+    Turn { role, text: text.into(), sent: text.into(), attachment: None, model: "m".into(), stopped: false, execs: Vec::new(), hidden: false }
 }
 
 #[test]
@@ -151,13 +151,13 @@ fn ui_run_button_sends_command_and_risky_ones_ask_twice() {
     ui.click(iced::widget::Id::new(crate::ui_ai::RUN_BTN)).expect("run button visible");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        messages.iter().any(|m| matches!(m, Message::AiRun(t, c) if *t == id && c == "sudo ss -tulpn | grep :80")),
+        messages.iter().any(|m| matches!(m, Message::AiRun(t, 1, c) if *t == id && c == "sudo ss -tulpn | grep :80")),
         "{messages:?}"
     );
 
     // A destructive command does not run on the first click; the button asks again.
     let risky = "sudo rm -rf /var/cache/nginx".to_string();
-    let _ = app.update(Message::AiRun(id, risky.clone()));
+    let _ = app.update(Message::AiRun(id, 1, risky.clone()));
     let tab = app.tabs.iter().find(|t| t.id == id).unwrap();
     assert_eq!(tab.chat.run_confirm.as_deref(), Some(risky.as_str()));
     simulator(ui::view(&app)).find("한 번 더 눌러 실행").expect("confirm state shown");
@@ -1272,7 +1272,7 @@ fn agent_runs_a_read_only_command_reads_it_and_carries_on() {
 
     reply(&mut app, id, "목록 보여줘", "홈 폴더부터 볼게요.\n```bash\nls -al\n```\n");
     let chat = chat_of(&app, id);
-    let exec = chat.turns.last().unwrap().exec.as_ref().expect("command started");
+    let exec = chat.turns.last().unwrap().execs.last().expect("command started");
     assert_eq!((exec.cmd.as_str(), &exec.state), ("ls -al", &ExecState::Running));
     assert!(chat.is_streaming(), "busy while it runs: send is blocked, stop cancels");
 
@@ -1282,7 +1282,7 @@ fn agent_runs_a_read_only_command_reads_it_and_carries_on() {
     let chat = chat_of(&app, id);
     let n = chat.turns.len();
     assert_eq!(n, 4, "user, assistant(command), hidden result, new assistant");
-    let exec = chat.turns[1].exec.as_ref().unwrap();
+    let exec = &chat.turns[1].execs[0];
     assert!(exec.sent);
     let ExecState::Done { output, exit, secrets } = &exec.state else { panic!("{:?}", exec.state) };
     assert_eq!((*exit, *secrets), (None, 1), "read off the screen: no exit code");
@@ -1297,15 +1297,15 @@ fn agent_runs_a_read_only_command_reads_it_and_carries_on() {
     ui.find("실행함 · 3줄").expect("compact command line");
     assert!(ui.find("<command_result").is_err());
     drop(ui);
-    let _ = app.update(Message::AgentToggle(id, 1));
+    let _ = app.update(Message::AgentToggle(id, 1, 0));
     simulator(ui::view(&app)).find("devora-ai\ndevora-gateway\napi_key=••••••••").expect("output shown");
-    let _ = app.update(Message::AgentToggle(id, 1));
+    let _ = app.update(Message::AgentToggle(id, 1, 0));
 
     // The model answers from the result, in Markdown; no command, so nothing more runs.
     let summary = "홈 디렉터리 `/home/hwr` 목록이에요.\n\n**폴더**\n\n| 이름 | 수정일 |\n|---|---|\n| devora-ai/ | 11월 12일 |\n| devora-gateway/ | 11월 4일 |\n\n- 설정 파일에 키가 하나 보여서 가렸어요.\n\n안쪽 폴더도 볼까요?";
     let _ = app.update(Message::AiEvent(id, Ok(StreamEvent::Delta(summary.into()))));
     let _ = app.update(Message::AiEvent(id, Ok(StreamEvent::Done { stop_reason: None })));
-    assert!(chat_of(&app, id).turns.last().unwrap().exec.is_none());
+    assert!(chat_of(&app, id).turns.last().unwrap().execs.is_empty());
     // Rich text is not searchable by the simulator; the snapshot shows the table and bold text.
     let mut ui = simulator(ui::view(&app));
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
@@ -1317,7 +1317,7 @@ fn agent_runs_a_read_only_command_reads_it_and_carries_on() {
 fn agent_holds_back_on_risk_production_and_long_chains() {
     let mut app = app();
     let id = quiet_tab(&mut app);
-    let started = |app: &CoShell| chat_of(app, id).turns.last().unwrap().exec.is_some();
+    let started = |app: &CoShell| !chat_of(app, id).turns.last().unwrap().execs.is_empty();
 
     // Changes are never run for the user; a placeholder can not run.
     for answer in ["```bash\nsudo systemctl restart nginx\n```", "```bash\nrm -rf /nonexistent-coshell\n```", "```bash\npodman logs <name>\n```", "그냥 설명만 할게요."] {
@@ -1517,7 +1517,7 @@ fn readme_screenshots() {
         let chat = &mut app.tabs.iter_mut().find(|t| t.id == id).unwrap().chat;
         chat.turns.push(t(Role::User, "nginx가 왜 안 떠?"));
         chat.turns.push(Turn {
-            exec: Some(Exec {
+            execs: vec![Exec {
                 cmd: "sudo ss -tlnp | grep :80".into(),
                 state: ExecState::Done {
                     output: "LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:((\"apache2\",pid=912,fd=4))".into(),
@@ -1526,7 +1526,8 @@ fn readme_screenshots() {
                 },
                 sent: true,
                 open: false,
-            }),
+                manual: false,
+            }],
             ..t(Role::Assistant, "80번 포트를 누가 쓰고 있는지부터 볼게요.\n```bash\nsudo ss -tlnp | grep :80\n```")
         });
         chat.turns.push(Turn { hidden: true, ..t(Role::User, "") });
@@ -1617,4 +1618,101 @@ fn korean_being_composed_is_drawn_inline() {
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
         let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("ime-preedit"));
     }
+}
+
+#[test]
+fn run_button_waits_for_the_reply_and_turns_into_progress_once_pressed() {
+    use crate::ai::ExecState;
+    use crate::ui_ai::RUN_BTN;
+    let mut app = app();
+    let id = quiet_tab(&mut app);
+    let cmd = "sudo systemctl restart nginx"; // a change: never run by the assistant itself
+    let answer = format!("재시작할게요.\n```bash\n{cmd}\n```");
+    let has_run_button = |app: &CoShell| simulator(ui::view(app)).find(iced::widget::Id::new(RUN_BTN)).is_ok();
+
+    // While the reply is still streaming there is no ▶ to press.
+    {
+        let tab = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+        tab.chat.turns.push(turn(Role::User, "nginx 재시작"));
+        tab.chat.turns.push(turn(Role::Assistant, &answer));
+        let (_task, handle) = iced::Task::<Message>::none().abortable();
+        tab.chat.streaming = Some(handle);
+    }
+    assert!(!has_run_button(&app), "no ▶ before the reply is complete");
+    let _ = app.update(Message::AiEvent(id, Ok(StreamEvent::Done { stop_reason: None })));
+    assert!(chat_of(&app, id).turns[1].execs.is_empty(), "changes are not run by the assistant");
+    assert!(has_run_button(&app));
+
+    // Pressed: typed into the terminal, and the card becomes a progress line without ▶.
+    feed(&app, id, b"\x1b[2J\x1b[3J\x1b[Hme@host:~ $ ");
+    let _ = app.update(Message::AiRun(id, 1, cmd.into()));
+    let e = &chat_of(&app, id).turns[1].execs[0];
+    assert_eq!((e.cmd.as_str(), &e.state, e.manual), (cmd, &ExecState::Running, true));
+    assert!(!has_run_button(&app), "no second ▶ while it runs");
+    simulator(ui::view(&app)).find("실행 중…").expect("progress shown");
+    let _ = app.update(Message::AiRun(id, 1, cmd.into()));
+    assert_eq!(chat_of(&app, id).turns[1].execs.len(), 1, "a second press while running does nothing");
+
+    // Done: shown on the card; in agent mode the assistant hears the result and carries on.
+    let Message::AgentDone(_, r) = ran("Job for nginx.service done.\n", 0) else { unreachable!() };
+    let _ = app.update(Message::AgentDone(id, r));
+    let chat = chat_of(&app, id);
+    assert!(matches!(chat.turns[1].execs[0].state, ExecState::Done { .. }));
+    assert!(chat.turns[2].hidden && chat.turns[2].sent.contains("systemctl restart nginx"));
+
+    // Manual mode: shown, not sent.
+    let _ = app.update(Message::AiAutoRun);
+    let _ = app.update(Message::AiNewChat(id));
+    {
+        let tab = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+        tab.chat.turns.push(turn(Role::User, "q"));
+        tab.chat.turns.push(turn(Role::Assistant, &answer));
+    }
+    feed(&app, id, b"\r\nme@host:~ $ ");
+    let _ = app.update(Message::AiRun(id, 1, cmd.into()));
+    let Message::AgentDone(_, r) = ran("ok\n", 0) else { unreachable!() };
+    let _ = app.update(Message::AgentDone(id, r));
+    let chat = chat_of(&app, id);
+    assert_eq!(chat.turns.len(), 2, "nothing sent to the model");
+    assert!(chat.turns[1].execs[0].sent);
+}
+
+#[test]
+fn new_release_is_offered_in_the_status_bar() {
+    use crate::update::Release;
+    let mut app = app();
+    assert!(app.settings.update_check, "on by default");
+    let rel = Release {
+        version: "9.0.0".into(),
+        page: "https://github.com/softkr/CoShell/releases/tag/v9.0.0".into(),
+        dmg: Some("https://example.com/CoShell-9.0.0.dmg".into()),
+        sha256: Some("0".repeat(64)),
+    };
+    let _ = app.update(Message::UpdateChecked(Ok(Some(rel.clone()))));
+    assert!(app.notice.as_deref().is_some_and(|n| n.contains("9.0.0")));
+    let mut ui = simulator(ui::view(&app));
+    ui.click("⬆ 9.0.0 업데이트").expect("status bar offer");
+    for m in ui.into_messages() {
+        let _ = app.update(m);
+    }
+    assert!(app.update_confirm);
+    // `cargo test` is not an app bundle, so the dialog offers the release page instead.
+    let mut ui = simulator(ui::view(&app));
+    ui.find("릴리스 페이지 열기").expect("dialog");
+    if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+        let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("update"));
+    }
+    drop(ui);
+    let _ = app.update(Message::Shortcut(crate::app::Shortcut::Escape));
+    assert!(!app.update_confirm);
+
+    // Checked again later: told only once per version; gone when up to date or failing quietly.
+    app.notice = None;
+    let _ = app.update(Message::UpdateChecked(Ok(Some(rel))));
+    assert!(app.notice.is_none());
+    let _ = app.update(Message::UpdateChecked(Err("offline".into())));
+    assert!(app.update.is_some(), "a failed check keeps what was found");
+    let _ = app.update(Message::UpdateChecked(Ok(None)));
+    assert!(app.update.is_none());
+    assert!(simulator(ui::view(&app)).find("⬆ 9.0.0 업데이트").is_err());
 }
