@@ -195,6 +195,8 @@ fn general(d: &SettingsDraft) -> El<'_> {
         muted(tf("스크롤백 {0}–{1} · 첨부 {2}–{3}", &[&settings::SCROLLBACK_MIN, &settings::SCROLLBACK_MAX, &settings::ATTACH_LINES_MIN, &settings::ATTACH_LINES_MAX])),
         checkbox(s.option_as_meta).label(tr("Option 키를 Meta로 사용 (셸에서 단어 단위 이동)")).on_toggle(Message::SettingsOptionMeta).size(14).text_size(12),
         muted(tr("끄면 Option 조합으로 특수 문자를 입력합니다.")),
+        checkbox(s.update_check).label(tr("업데이트 자동 확인 (10분마다)")).on_toggle(Message::SettingsUpdateCheck).size(14).text_size(12),
+        muted(tr("GitHub에서 새 버전이 있는지만 확인합니다. 설치는 상태바에서 직접 고릅니다.")),
         Space::new().height(6),
         section(tr("단축키")),
         shortcuts(),

@@ -239,6 +239,9 @@ pub fn view(app: &CoShell) -> El<'_> {
     if app.about {
         layers.push(modal(about_dialog()));
     }
+    if let (true, Some(u)) = (app.update_confirm, &app.update) {
+        layers.push(modal(update_dialog(u, app.update_busy)));
+    }
     // Korean (and other IME) composing text drawn inline, without the runtime's boxed overlay.
     crate::ime::Ime::new(stack(layers), theme::TEXT, theme::BG_0).on_compose(Message::Composing).into()
 }
@@ -500,6 +503,15 @@ fn status_bar(app: &CoShell) -> El<'_> {
         let size = s.size();
         items.push(small(format!("{}×{}", size.cols, size.rows), theme::TEXT_3).into());
     }
+    if let Some(u) = &app.update {
+        items.push(
+            button(text(tf("⬆ {0} 업데이트", &[&u.version])).size(11).color(theme::ACCENT))
+                .padding([1, 6])
+                .style(btn_style(Btn::Ghost))
+                .on_press(Message::UpdateAsk)
+                .into(),
+        );
+    }
     items.push(small(tf("서버 {0}", &[&app.hosts.len()]), theme::TEXT_3).into());
     items.push(
         button(text(tr("설정")).size(11).color(theme::TEXT_3)).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::SettingsOpen).into(),
@@ -708,6 +720,38 @@ fn about_dialog<'a>() -> El<'a> {
     )
     .padding(24)
     .width(320)
+    .style(card_style(theme::LINE_2))
+    .into()
+}
+
+/// "Update now?": what happens, release notes, later / now.
+fn update_dialog(u: &crate::update::Release, busy: bool) -> El<'_> {
+    let bundled = crate::update::running_bundle().is_some();
+    let what = if bundled {
+        tr("내려받아 SHA-256을 확인한 뒤 앱을 바꾸고 다시 시작합니다. 열린 SSH 세션과 터미널은 닫힙니다.")
+    } else {
+        tr("개발 빌드라 여기서 바로 설치할 수 없습니다. 릴리스 페이지를 엽니다.")
+    };
+    let now = if busy { tr("내려받는 중…") } else if bundled { tr("지금 업데이트") } else { tr("릴리스 페이지 열기") };
+    container(
+        column![
+            row![crate::icons::icon(&crate::icons::APP, 28.0), text(tf("CoShell {0}", &[&u.version])).size(15)].spacing(10).align_y(Alignment::Center),
+            text(tf("지금 쓰는 버전은 {0}입니다.", &[&crate::VERSION])).size(12).color(theme::TEXT_2),
+            muted(what),
+            Space::new().height(6),
+            row![
+                btn(tr("릴리스 노트"), Btn::Ghost, (!u.page.is_empty()).then(|| Message::OpenLink(u.page.clone()))),
+                Space::new().width(Length::Fill),
+                btn(tr("나중에"), Btn::Ghost, (!busy).then_some(Message::UpdateCancel)),
+                btn(now, Btn::Primary, (!busy).then_some(Message::UpdateInstall)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8),
+    )
+    .padding(20)
+    .width(MODAL_W)
     .style(card_style(theme::LINE_2))
     .into()
 }

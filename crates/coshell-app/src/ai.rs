@@ -33,8 +33,8 @@ pub struct Turn {
     pub attachment: Option<String>,
     pub model: String,
     pub stopped: bool,
-    /// Command the assistant ran itself (agent mode) and what came back.
-    pub exec: Option<Exec>,
+    /// Commands from this reply that were run (by the assistant or with ▶) and what came back.
+    pub execs: Vec<Exec>,
     /// A command result fed back to the model: sent, but not shown as a bubble.
     pub hidden: bool,
 }
@@ -45,6 +45,8 @@ pub enum ExecState {
     /// Output already cleaned and masked.
     Done { output: String, exit: Option<u32>, secrets: usize },
     Failed(String),
+    /// Typed into a terminal whose prompt was not recognised: not watched, nothing to read.
+    Typed,
 }
 
 /// A command the assistant ran in the background to read its result.
@@ -56,6 +58,8 @@ pub struct Exec {
     pub sent: bool,
     /// Output expanded in the chat.
     pub open: bool,
+    /// Run with ▶ by the user (otherwise by the assistant).
+    pub manual: bool,
 }
 
 pub struct Chat {
@@ -85,9 +89,9 @@ impl Chat {
             h.abort();
             if let Some(t) = self.turns.last_mut().filter(|t| t.role == Role::Assistant) {
                 t.stopped = true;
-                if let Some(e) = t.exec.as_mut().filter(|e| e.state == ExecState::Running) {
-                    e.state = ExecState::Failed(tr("중지했습니다").into());
-                }
+            }
+            for e in self.turns.iter_mut().flat_map(|t| t.execs.iter_mut()).filter(|e| e.state == ExecState::Running) {
+                e.state = ExecState::Failed(tr("중지했습니다").into());
             }
         }
     }
@@ -276,7 +280,7 @@ impl Ai {
             attachment: attachment.map(|a| a.label),
             model: String::new(),
             stopped: false,
-            exec: None,
+            execs: Vec::new(),
             hidden: false,
         });
         Some((profile, key))
@@ -306,7 +310,7 @@ impl Ai {
             attachment: None,
             model: profile.model.clone(),
             stopped: false,
-            exec: None,
+            execs: Vec::new(),
             hidden: false,
         });
         let (task, handle) = Task::run(self.client.stream(&profile, key, &req), move |item| Message::AiEvent(tab, item)).abortable();

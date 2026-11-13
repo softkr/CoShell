@@ -22,6 +22,7 @@ mod ui_keys;
 mod ui_servers;
 mod ui_settings;
 mod ui_tunnel;
+mod update;
 #[cfg(test)]
 mod tests;
 

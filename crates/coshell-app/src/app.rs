@@ -307,6 +307,12 @@ pub struct CoShell {
     pub key_import: Option<KeyImport>,
     /// An input method is composing text (placeholders of multi-line editors step aside).
     pub composing: bool,
+    /// A newer release, once found.
+    pub update: Option<crate::update::Release>,
+    /// The update dialog is open.
+    pub update_confirm: bool,
+    /// Downloading / installing.
+    pub update_busy: bool,
     /// Imported key waiting for a second click on Delete.
     pub key_delete: Option<PathBuf>,
     tunnel_seq: u64,
@@ -450,6 +456,13 @@ pub enum Message {
     SettingsScrollback(String),
     SettingsAttachLines(String),
     SettingsOptionMeta(bool),
+    SettingsUpdateCheck(bool),
+    UpdateCheck,
+    UpdateChecked(Result<Option<crate::update::Release>, String>),
+    UpdateAsk,
+    UpdateCancel,
+    UpdateInstall,
+    UpdateInstalled(Result<PathBuf, String>),
     WindowResized(iced::Size),
     PersistState,
     /// Drag the window from an empty spot of the tab bar.
@@ -500,15 +513,16 @@ pub enum Message {
     AiSuggest(TabId, String, bool),
     AiCopy(String),
     /// Type the command and press Enter (risky ones need a second click).
-    AiRun(TabId, String),
+    /// ▶ on a command card: (tab, turn index, command).
+    AiRun(TabId, usize, String),
     /// Switch between running read-only commands automatically and only on ▶.
     AiAutoRun,
     /// A command the assistant ran in the background finished.
     AgentDone(TabId, Result<ScreenRun, String>),
     /// Production: the user lets a command result go to the model.
     AgentSend(TabId),
-    /// Show / hide a command's output in the chat (tab, turn index).
-    AgentToggle(TabId, usize),
+    /// Show / hide a command's output in the chat (tab, turn index, run index).
+    AgentToggle(TabId, usize, usize),
     AiSettingsOpen,
     AiSettingsSelect(usize),
     AiSettingsName(String),
@@ -616,7 +630,8 @@ impl CoShell {
                 app.open_ssh(name, chain, opts, Vec::new(), Env::None)
             }
         };
-        (app, Task::batch([task, Task::done(Message::InstallMenu)]))
+        let check = if app.settings.update_check { Task::done(Message::UpdateCheck) } else { Task::none() };
+        (app, Task::batch([task, Task::done(Message::InstallMenu), check]))
     }
 
     /// State without touching user files (also used by tests).
@@ -649,6 +664,9 @@ impl CoShell {
             keys: Vec::new(),
             key_import: None,
             composing: false,
+            update: None,
+            update_confirm: false,
+            update_busy: false,
             key_delete: None,
             tunnel_seq: 0,
             host_store,
@@ -792,6 +810,7 @@ impl CoShell {
             && self.attach_confirm.is_none()
             && !self.host_view
             && !self.about
+            && !self.update_confirm
             && self.search.is_none()
             && self.close_confirm.is_none()
             && self.settings_draft.is_none()
@@ -1014,6 +1033,7 @@ impl CoShell {
             Message::SettingsScrollback(v) => d.scrollback = v,
             Message::SettingsAttachLines(v) => d.attach_lines = v,
             Message::SettingsOptionMeta(v) => d.s.option_as_meta = v,
+            Message::SettingsUpdateCheck(v) => d.s.update_check = v,
             _ => {}
         }
     }
@@ -1363,6 +1383,60 @@ impl CoShell {
                 }
                 Task::none()
             }
+            Message::UpdateCheck => {
+                if self.update_busy || !self.settings.update_check {
+                    return Task::none();
+                }
+                Task::perform(crate::update::check(), Message::UpdateChecked)
+            }
+            Message::UpdateChecked(r) => {
+                match r {
+                    Ok(Some(rel)) => {
+                        // Say it once per version; the status bar keeps offering it.
+                        if self.update.as_ref().map(|u| &u.version) != Some(&rel.version) {
+                            self.notice = Some(tf("CoShell {0}이 나왔습니다. 상태바에서 업데이트할 수 있어요.", &[&rel.version]));
+                        }
+                        self.update = Some(rel);
+                    }
+                    Ok(None) => self.update = None,
+                    Err(_) => {} // offline or unreachable: try again next time, quietly
+                }
+                Task::none()
+            }
+            Message::UpdateAsk => {
+                self.update_confirm = self.update.is_some();
+                Task::none()
+            }
+            Message::UpdateCancel => {
+                if !self.update_busy {
+                    self.update_confirm = false;
+                }
+                Task::none()
+            }
+            Message::UpdateInstall => {
+                let Some(rel) = self.update.clone() else { return Task::none() };
+                let Some(bundle) = crate::update::running_bundle() else {
+                    // A development build: there is no app bundle to replace.
+                    self.update_confirm = false;
+                    return self.update(Message::OpenLink(rel.page));
+                };
+                self.update_busy = true;
+                Task::perform(crate::update::install(rel, bundle), Message::UpdateInstalled)
+            }
+            Message::UpdateInstalled(r) => {
+                self.update_busy = false;
+                match r.and_then(|bundle| crate::update::relaunch(&bundle)) {
+                    Ok(()) => {
+                        self.persist_settings();
+                        iced::exit()
+                    }
+                    Err(e) => {
+                        self.update_confirm = false;
+                        self.notice = Some(tf("업데이트하지 못했습니다: {0}", &[&e]));
+                        Task::none()
+                    }
+                }
+            }
             Message::OpenLink(url) => {
                 // Terminal output is untrusted: web links only, nothing a launcher could misread.
                 let web = url.starts_with("http://") || url.starts_with("https://");
@@ -1591,7 +1665,8 @@ impl CoShell {
             | Message::SettingsCursor(_)
             | Message::SettingsScrollback(_)
             | Message::SettingsAttachLines(_)
-            | Message::SettingsOptionMeta(_)) => {
+            | Message::SettingsOptionMeta(_)
+            | Message::SettingsUpdateCheck(_)) => {
                 self.update_settings(m);
                 Task::none()
             }
@@ -1972,51 +2047,69 @@ impl CoShell {
         }
     }
 
-    /// Agent mode: the reply that just ended asked for a read-only command. Type it into the
-    /// user's terminal (they watch it run) and read the result off the screen for the model.
+    /// Agent mode: the reply that just ended asked for a read-only command. Run it in the
+    /// user's terminal (they watch it) and read the result off the screen for the model.
     fn agent_step(&mut self, id: TabId) -> Task<Message> {
         if !self.settings.ai_agent {
             return Task::none();
         }
-        let Some(Tab { phase: Phase::Live(s), exited: false, chat, .. }) = self.tabs.iter_mut().find(|t| t.id == id) else {
-            return Task::none();
-        };
-        if chat.agent_steps() >= AGENT_MAX_STEPS {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return Task::none() };
+        if tab.chat.agent_steps() >= AGENT_MAX_STEPS {
             return Task::none();
         }
-        let Some(turn) = chat.turns.last_mut().filter(|t| t.role == Role::Assistant && !t.stopped) else { return Task::none() };
+        let Some((index, turn)) = tab.chat.turns.iter().enumerate().last().filter(|(_, t)| t.role == Role::Assistant && !t.stopped) else {
+            return Task::none();
+        };
         let first = assist::segments(&turn.text).into_iter().find_map(|seg| match seg {
             assist::Segment::Code { lang, code, closed: true } if assist::is_shell(&lang) => Some(assist::command_text(&code)),
             _ => None,
         });
-        let Some(cmd) = first.filter(|c| assist::auto_runnable(c)) else { return Task::none() };
-        let term = s.term().clone();
-        // Only at an idle prompt: never type into a running program or over the user's half-typed line.
-        let prompt = coshell_term::logical_lines(&term, 4).pop().unwrap_or_default();
-        let bracketed = term.lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
-        let bytes = assist::run_bytes(&cmd, bracketed);
-        let (Some(bytes), true) = (bytes, assist::looks_like_prompt(&prompt)) else {
-            turn.exec = Some(Exec {
-                cmd,
-                state: ExecState::Failed(tr("터미널이 다른 작업 중이라 실행하지 못했어요").into()),
-                sent: true,
-                open: true,
-            });
+        match first.filter(|c| assist::auto_runnable(c)) {
+            Some(cmd) => self.run_in_terminal(id, index, cmd, false),
+            None => Task::none(),
+        }
+    }
+
+    /// Type `cmd` into the tab's terminal and watch it until the prompt is back. The command
+    /// is recorded on turn `index`, where it replaces its ▶ card with a progress line.
+    fn run_in_terminal(&mut self, id: TabId, index: usize, cmd: String, manual: bool) -> Task<Message> {
+        let Some(Tab { phase: Phase::Live(s), exited: false, chat, .. }) = self.tabs.iter_mut().find(|t| t.id == id) else {
             return Task::none();
         };
+        if chat.is_streaming() || index >= chat.turns.len() {
+            return Task::none(); // one at a time: the terminal is busy
+        }
+        let term = s.term().clone();
+        let prompt = coshell_term::logical_lines(&term, 4).pop().unwrap_or_default();
+        let bracketed = term.lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+        let Some(bytes) = assist::run_bytes(&cmd, bracketed) else { return Task::none() };
+        let execs = &mut chat.turns[index].execs;
+        let exec = |state, sent| Exec { cmd: cmd.clone(), state, sent, open: false, manual };
+        if !assist::looks_like_prompt(&prompt) {
+            if manual {
+                // The user asked for it: type it, even if this prompt is not one we can read.
+                s.write(&bytes);
+                execs.push(exec(ExecState::Typed, true));
+            } else {
+                // Never type into a running program or over a half-typed line on its own.
+                execs.push(Exec { open: true, ..exec(ExecState::Failed(tr("터미널이 다른 작업 중이라 실행하지 못했어요").into()), true) });
+            }
+            return Task::none();
+        }
         s.write(&bytes);
-        turn.exec = Some(Exec { cmd: cmd.clone(), state: ExecState::Running, sent: false, open: false });
+        execs.push(exec(ExecState::Running, false));
         let (task, handle) = Task::perform(watch_screen(term, prompt, cmd), move |r| Message::AgentDone(id, r)).abortable();
         chat.streaming = Some(handle);
         task
     }
 
-    /// Result is in: show it, and pass it on (production waits for a click).
+    /// Result is in: show it, and pass it on in agent mode (production waits for a click).
     fn agent_done(&mut self, id: TabId, r: Result<ScreenRun, String>) -> Task<Message> {
+        let agent = self.settings.ai_agent;
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
         let prod = tab.env == Env::Prod;
         tab.chat.streaming = None;
-        let Some(exec) = tab.chat.turns.last_mut().and_then(|t| t.exec.as_mut()).filter(|e| e.state == ExecState::Running) else {
+        let Some(exec) = tab.chat.turns.iter_mut().rev().flat_map(|t| t.execs.iter_mut().rev()).find(|e| e.state == ExecState::Running) else {
             return Task::none();
         };
         exec.state = match r {
@@ -2030,6 +2123,10 @@ impl CoShell {
             }
             Err(e) => ExecState::Failed(e),
         };
+        if !agent {
+            exec.sent = true; // manual mode: the result is shown, not sent
+            return Task::none();
+        }
         if prod { Task::none() } else { self.agent_send(id) }
     }
 
@@ -2042,14 +2139,20 @@ impl CoShell {
         if chat.is_streaming() {
             return Task::none();
         }
-        let Some(exec) = chat.turns.last_mut().and_then(|t| t.exec.as_mut()).filter(|e| !e.sent && e.state != ExecState::Running) else {
+        let Some(exec) = chat
+            .turns
+            .iter_mut()
+            .rev()
+            .flat_map(|t| t.execs.iter_mut().rev())
+            .find(|e| !e.sent && matches!(e.state, ExecState::Done { .. } | ExecState::Failed(_)))
+        else {
             return Task::none();
         };
         exec.sent = true;
         let sent = match &exec.state {
             ExecState::Done { output, exit, .. } => assist::command_result(&exec.cmd, *exit, output),
             ExecState::Failed(e) => assist::command_result(&exec.cmd, None, &format!("[could not run: {e}]")),
-            ExecState::Running => unreachable!("filtered above"),
+            ExecState::Running | ExecState::Typed => unreachable!("filtered above"),
         };
         chat.turns.push(Turn {
             role: Role::User,
@@ -2058,7 +2161,7 @@ impl CoShell {
             attachment: None,
             model: String::new(),
             stopped: false,
-            exec: None,
+            execs: Vec::new(),
             hidden: true,
         });
         self.ai.retry(id, chat, &target, agent)
@@ -2148,6 +2251,7 @@ impl CoShell {
                 Task::none()
             }
             Shortcut::Settings => self.update(if self.settings_draft.is_some() { Message::SettingsClose } else { Message::SettingsOpen }),
+            Shortcut::Escape if self.update_confirm => self.update(Message::UpdateCancel),
             Shortcut::Escape if self.key_import.is_some() => self.update(Message::KeyImportClose),
             Shortcut::Escape if self.editor.is_some() => self.update(Message::HostEditorClose),
             Shortcut::Escape if self.settings_draft.is_some() => self.update(Message::SettingsClose),
@@ -2368,8 +2472,8 @@ impl CoShell {
             Message::AiCopy(text) => iced::clipboard::write(text),
             Message::AgentDone(id, r) => self.agent_done(id, r),
             Message::AgentSend(id) => self.agent_send(id),
-            Message::AgentToggle(id, i) => {
-                if let Some(e) = self.chat_mut(id).and_then(|c| c.turns.get_mut(i)).and_then(|t| t.exec.as_mut()) {
+            Message::AgentToggle(id, i, j) => {
+                if let Some(e) = self.chat_mut(id).and_then(|c| c.turns.get_mut(i)).and_then(|t| t.execs.get_mut(j)) {
                     e.open = !e.open;
                 }
                 Task::none()
@@ -2379,20 +2483,15 @@ impl CoShell {
                 self.state_dirty = true;
                 Task::none()
             }
-            Message::AiRun(id, cmd) => {
+            Message::AiRun(id, index, cmd) => {
                 let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
                 if assist::run_needs_confirm(&cmd, tab.env == Env::Prod) && tab.chat.run_confirm.as_deref() != Some(cmd.as_str()) {
                     tab.chat.run_confirm = Some(cmd);
                     return Task::none();
                 }
                 tab.chat.run_confirm = None;
-                if let Tab { phase: Phase::Live(s), exited: false, .. } = tab {
-                    let bracketed = s.term().lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
-                    if let Some(bytes) = assist::run_bytes(&cmd, bracketed) {
-                        s.write(&bytes);
-                    }
-                }
-                self.focus_terminal()
+                let run = self.run_in_terminal(id, index, cmd, true);
+                Task::batch([run, self.focus_terminal()])
             }
             Message::AiSettingsOpen => {
                 self.open_settings(SettingsTab::Ai);
@@ -2510,7 +2609,12 @@ impl CoShell {
         let menu = Subscription::run(crate::menu::events);
         #[cfg(not(target_os = "macos"))]
         let menu = Subscription::none();
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu])
+        let updates = if self.settings.update_check {
+            iced::time::every(crate::update::CHECK_EVERY).map(|_| Message::UpdateCheck)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates])
     }
 }
 

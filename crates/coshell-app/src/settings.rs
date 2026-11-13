@@ -123,6 +123,8 @@ pub struct Settings {
     pub ai_panel_open: bool,
     /// Remembered toggle: the assistant runs read-only commands itself and reads the results.
     pub ai_agent: bool,
+    /// Look for a new release on start and every 10 minutes.
+    pub update_check: bool,
     /// Remembered state: dragged with the divider.
     pub ai_panel_width: f32,
     pub window: WindowSize,
@@ -141,6 +143,7 @@ impl Default for Settings {
             ai_attach_lines: ATTACH_LINES_DEFAULT,
             ai_panel_open: true,
             ai_agent: true,
+            update_check: true,
             ai_panel_width: AI_PANEL_W_DEFAULT,
             window: WindowSize::default(),
         }
