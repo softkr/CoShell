@@ -137,7 +137,13 @@ jobs:
           ls -la dist
           if gh release view "$TAG" -R "$REPO" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* -R "$REPO" --clobber
-            gh release edit "$TAG" -R "$REPO" --draft=false
           else
-            gh release create "$TAG" dist/* -R "$REPO" --title "CoShell ${TAG#v}" --generate-notes
+            gh release create "$TAG" dist/* -R "$REPO" --title "CoShell ${TAG#v}" --generate-notes --draft
           fi
+          # Apps up to 0.4.0 only read the DMG's hash from a `SHA-256 (`file`): `hash`` line
+          # of the notes, not from the `.sha256` file, so put that line in before publishing.
+          read -r hash dmg < "$(ls dist/*.dmg.sha256)"
+          gh release view "$TAG" -R "$REPO" --json body -q .body \
+            | grep -v "^SHA-256 (\`$dmg\`)" > notes.md || true
+          printf '\nSHA-256 (`%s`): `%s`\n' "$dmg" "$hash" >> notes.md
+          gh release edit "$TAG" -R "$REPO" --notes-file notes.md --draft=false
