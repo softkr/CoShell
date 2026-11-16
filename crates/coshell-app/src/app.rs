@@ -217,6 +217,15 @@ pub enum PaletteItem {
     About,
 }
 
+/// Update check started by opening "About CoShell".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AboutCheck {
+    Checking,
+    /// Answered: [`CoShell::update`] holds the newer release, if any.
+    Done,
+    Failed(String),
+}
+
 pub struct Palette {
     pub query: String,
     pub selected: usize,
@@ -328,6 +337,8 @@ pub struct CoShell {
     pub host_view: bool,
     /// "About CoShell" dialog.
     pub about: bool,
+    /// Its update check (`None` while closed).
+    pub about_check: Option<AboutCheck>,
     pub host_filter: String,
     /// Prod output waiting for the user's OK before it can go to the AI.
     pub attach_confirm: Option<(TabId, Attachment)>,
@@ -677,6 +688,7 @@ impl CoShell {
             editor: None,
             host_view: false,
             about: false,
+            about_check: None,
             host_filter: String::new(),
             attach_confirm: None,
             settings: Settings::default(),
@@ -1272,10 +1284,8 @@ impl CoShell {
                 self.open_settings(SettingsTab::General);
                 Task::none()
             }
-            PaletteItem::About => {
-                self.about = true;
-                Task::none()
-            }
+            PaletteItem::About if self.about => Task::none(),
+            PaletteItem::About => self.update(Message::About),
             PaletteItem::Host(i) => {
                 let Some(alias) = self.hosts.get(i).map(|h| h.alias.clone()) else { return Task::none() };
                 self.connect_alias(&alias)
@@ -1390,6 +1400,12 @@ impl CoShell {
                 Task::perform(crate::update::check(), Message::UpdateChecked)
             }
             Message::UpdateChecked(r) => {
+                if self.about_check.is_some() {
+                    self.about_check = Some(match &r {
+                        Ok(_) => AboutCheck::Done,
+                        Err(e) => AboutCheck::Failed(e.clone()),
+                    });
+                }
                 match r {
                     Ok(Some(rel)) => {
                         // Say it once per version; the status bar keeps offering it.
@@ -1764,7 +1780,13 @@ impl CoShell {
             Message::Tick => Task::none(),
             Message::About => {
                 self.about = !self.about;
-                Task::none()
+                self.about_check = None;
+                if !self.about || self.update_busy {
+                    return Task::none();
+                }
+                // Asked for by hand: runs even with the automatic check turned off.
+                self.about_check = Some(AboutCheck::Checking);
+                Task::perform(crate::update::check(), Message::UpdateChecked)
             }
             Message::HostEdit(a) => self.open_editor(Some(a)),
             Message::HostView => {

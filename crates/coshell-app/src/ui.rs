@@ -237,7 +237,7 @@ pub fn view(app: &CoShell) -> El<'_> {
         layers.push(palette(app));
     }
     if app.about {
-        layers.push(modal(about_dialog()));
+        layers.push(modal(about_dialog(app)));
     }
     if let (true, Some(u)) = (app.update_confirm, &app.update) {
         layers.push(modal(update_dialog(u, app.update_busy)));
@@ -705,13 +705,26 @@ fn failed_card<'a>(tab: &'a Tab, err: &'a str) -> El<'a> {
     .into()
 }
 
-fn about_dialog<'a>() -> El<'a> {
+fn about_dialog(app: &CoShell) -> El<'_> {
+    use crate::app::AboutCheck;
+    let status: El<'_> = match (&app.about_check, &app.update) {
+        (Some(AboutCheck::Checking), _) => text(tr("업데이트 확인 중…")).size(12).color(theme::TEXT_3).into(),
+        (_, Some(u)) => button(text(tf("{0} 버전으로 업데이트", &[&u.version])).size(12).color(theme::ACCENT))
+            .padding([2, 8])
+            .style(btn_style(Btn::Ghost))
+            .on_press(Message::UpdateAsk)
+            .into(),
+        (Some(AboutCheck::Done), None) => text(tr("최신 버전입니다")).size(12).color(theme::TEXT_3).into(),
+        (Some(AboutCheck::Failed(e)), None) => text(tf("업데이트를 확인하지 못했습니다: {0}", &[e])).size(12).color(theme::ERR).into(),
+        (None, None) => Space::new().into(),
+    };
     container(
         column![
             crate::icons::icon(&crate::icons::APP, 80.0),
             text("CoShell").size(20),
             text(tf("버전 {0}", &[&crate::VERSION])).size(12.5).color(theme::TEXT_2),
             muted(tr("SSH 접속, 터널, AI 도우미를 한곳에서 쓰는 터미널")),
+            status,
             Space::new().height(6),
             btn(tr("닫기"), Btn::Plain, Some(Message::About)),
         ]

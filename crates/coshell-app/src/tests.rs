@@ -515,6 +515,31 @@ fn version_is_shown_in_status_bar_and_about() {
     ui.click("닫기").expect("close");
 }
 
+#[test]
+fn opening_about_checks_for_updates_by_hand() {
+    use crate::app::AboutCheck;
+    let mut app = app();
+    app.settings.update_check = false; // a manual check ignores the automatic-check setting
+    let _ = app.update(Message::About);
+    assert_eq!(app.about_check, Some(AboutCheck::Checking));
+    simulator(ui::view(&app)).find("업데이트 확인 중…").expect("checking");
+    let _ = app.update(Message::UpdateChecked(Ok(None)));
+    assert_eq!(app.about_check, Some(AboutCheck::Done));
+    simulator(ui::view(&app)).find("최신 버전입니다").expect("up to date");
+    let _ = app.update(Message::UpdateChecked(Err("offline".into())));
+    simulator(ui::view(&app)).find("업데이트를 확인하지 못했습니다: offline").expect("error shown");
+    let rel = crate::update::Release { version: "9.9.9".into(), page: String::new(), dmg: None, sha256: None, sha256_url: None };
+    let _ = app.update(Message::UpdateChecked(Ok(Some(rel))));
+    let mut ui = simulator(ui::view(&app));
+    ui.click("9.9.9 버전으로 업데이트").expect("update offered");
+    for m in ui.into_messages() {
+        let _ = app.update(m);
+    }
+    assert!(app.update_confirm);
+    let _ = app.update(Message::About);
+    assert_eq!((app.about, app.about_check), (false, None), "closing forgets the check");
+}
+
 fn saved(secrets: &MemSecrets) -> Vec<(String, String)> {
     let mut v: Vec<_> = secrets.0.lock().unwrap().iter().map(|(k, p)| (k.clone(), p.clone())).collect();
     v.sort();
