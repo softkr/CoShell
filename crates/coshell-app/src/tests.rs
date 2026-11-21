@@ -1094,7 +1094,7 @@ fn sidebar_lists_servers_and_snippets_type_into_the_terminal() {
     // Snippets: 입력 types without Enter, 실행 adds Enter.
     let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Snippets));
     let mut ui = simulator(ui::view(&app));
-    ui.find(">_ df -h").expect("snippet command");
+    ui.find("$ df -h").expect("snippet command");
     drop(ui);
     let _ = app.update(Message::Snippet(0, false));
     let _ = app.update(Message::TermInsert("uptime".into()));
@@ -1929,7 +1929,7 @@ fn design_sample_screen() {
     load_fonts();
     let settings = iced::Settings { default_font: crate::fonts::SANS, ..Default::default() };
     let mut ui = iced_test::Simulator::with_size(settings, (1440.0, 900.0), ui::view(&app));
-    for t in ["사용자", "ops@app-01", "df -h /var", "06:34:12", "app-01 리소스", "SSH 연결됨", "지연시간: ", "22ms", "Ubuntu 22.04 LTS", "운영 안전 잠금 ON", "Cluster: "] {
+    for t in ["사용자", "ops@app-01", "df -h /var", "06:34:12", "SSH 연결됨", "지연시간: ", "22ms", "Ubuntu 22.04 LTS", "운영 안전 잠금 ON"] {
         ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
     }
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {

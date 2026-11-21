@@ -53,6 +53,10 @@ fn window_settings(size: settings::WindowSize) -> iced::window::Settings {
         // (transparent title bar); elsewhere the usual title bar.
         #[cfg(target_os = "macos")]
         platform_specific: iced::window::settings::PlatformSpecific { title_hidden: true, titlebar_transparent: true, fullsize_content_view: true },
+        // The sidebar lets the blurred desktop show through, like Finder's; every other
+        // part of the view paints an opaque background.
+        transparent: cfg!(target_os = "macos"),
+        blur: cfg!(target_os = "macos"),
         ..Default::default()
     }
 }
@@ -105,9 +109,12 @@ fn main() -> iced::Result {
     .window(window_settings(window))
     .default_font(fonts::SANS)
     .theme(|_: &CoShell| iced::Theme::Dark)
-    // The window background and default text colour: also what shows behind
-    // anything transparent, so it must be ours rather than the stock grey.
-    .style(|_: &CoShell, _: &iced::Theme| iced::theme::Style { background_color: theme::BG_1, text_color: theme::TEXT })
+    // The window background and default text colour. Clear on macOS, where the sidebar is
+    // see-through; ours rather than the stock grey elsewhere.
+    .style(|_: &CoShell, _: &iced::Theme| iced::theme::Style {
+        background_color: if cfg!(target_os = "macos") { iced::Color::TRANSPARENT } else { theme::BG_1 },
+        text_color: theme::TEXT,
+    })
     .run()
 }
 
