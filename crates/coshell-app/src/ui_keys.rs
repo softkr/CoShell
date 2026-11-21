@@ -1,7 +1,7 @@
 //! SSH keys: the settings page, the import dialog and the server editor's key picker.
 
 use iced::widget::{Space, column, container, pick_list, row, scrollable, text, text_editor, text_input};
-use iced::{Alignment, Background, Border, Font, Length, Padding};
+use iced::{Alignment, Background, Border, Length, Padding};
 
 use crate::app::{CoShell, HostField, KeyImport, Message};
 use crate::i18n::{tf, tr};
@@ -15,7 +15,7 @@ const IMPORT_W: f32 = 560.0;
 const PRIVATE_H: f32 = 130.0;
 
 fn tag<'a>(label: String, color: iced::Color) -> El<'a> {
-    container(text(label).size(10.5).font(Font::MONOSPACE).color(color))
+    container(text(label).size(10.5).font(crate::fonts::MONO).color(color))
         .padding([1, 6])
         .style(move |_| container::Style {
             background: Some(Background::Color(alpha(color, 0.12))),
@@ -112,7 +112,7 @@ pub fn import_dialog(k: &KeyImport, composing: bool) -> El<'_> {
     let private = text_editor(&k.private)
         .placeholder(if composing { "" } else { tr("-----BEGIN OPENSSH PRIVATE KEY----- 로 시작하는 내용을 붙여 넣거나 파일을 선택하세요") })
         .on_action(Message::KeyImportPrivate)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::MONO)
         .size(11.5)
         .height(PRIVATE_H)
         .padding(10)
@@ -136,7 +136,7 @@ pub fn import_dialog(k: &KeyImport, composing: bool) -> El<'_> {
             (
                 text(s).size(11.5).color(theme::OK).into(),
                 match &i.public {
-                    Some(p) => container(text(p.clone()).size(11).font(Font::MONOSPACE).color(theme::TEXT_2))
+                    Some(p) => container(text(p.clone()).size(11).font(crate::fonts::MONO).color(theme::TEXT_2))
                         .padding([8, 10])
                         .width(Length::Fill)
                         .style(|_| container::Style {

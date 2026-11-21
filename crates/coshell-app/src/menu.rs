@@ -41,6 +41,8 @@ pub fn message(id: &str) -> Option<Message> {
         "find-up" => shortcut(Shortcut::FindNext(false)),
         "find-down" => shortcut(Shortcut::FindNext(true)),
         "ai-panel" => shortcut(Shortcut::AiPanel),
+        "sidebar" => shortcut(Shortcut::Sidebar),
+        "statusbar" => shortcut(Shortcut::StatusBar),
         "zoom-in" => shortcut(Shortcut::Zoom(1)),
         "zoom-out" => shortcut(Shortcut::Zoom(-1)),
         "zoom-reset" => shortcut(Shortcut::Zoom(0)),
@@ -106,7 +108,9 @@ fn build() -> muda::Result<Menu> {
         tr("보기"),
         true,
         &[
+            &item("sidebar", tr("서버 사이드바"), Some((CMD, Code::KeyB))),
             &item("ai-panel", tr("AI 패널"), Some((CMD, Code::KeyL))),
+            &item("statusbar", tr("상태 표시줄"), Some((CMD, Code::KeyJ))),
             &sep(),
             &item("zoom-in", tr("글꼴 크게"), Some((CMD, Code::Equal))),
             &item("zoom-out", tr("글꼴 작게"), Some((CMD, Code::Minus))),

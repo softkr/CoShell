@@ -17,15 +17,15 @@ const CARD_H: f32 = 104.0;
 const SSH_CONFIG_GROUP: &str = "~/.ssh/config";
 const NO_GROUP: &str = "그룹 없음";
 
-struct Card {
-    alias: String,
-    title: String,
-    command: String,
-    via: Option<String>,
-    env: Env,
+pub(crate) struct Card {
+    pub alias: String,
+    pub title: String,
+    pub command: String,
+    pub via: Option<String>,
+    pub env: Env,
 }
 
-fn cards(app: &CoShell) -> Vec<(String, Vec<Card>)> {
+pub(crate) fn cards(app: &CoShell) -> Vec<(String, Vec<Card>)> {
     let q = app.host_filter.trim().to_lowercase();
     let mut groups: Vec<(String, Vec<Card>)> = app.groups().into_iter().map(|g| (g, Vec::new())).collect();
     for e in &app.hosts {
@@ -147,7 +147,7 @@ pub fn page(app: &CoShell) -> El<'_> {
         let addable = group != SSH_CONFIG_GROUP;
         let target = (group != NO_GROUP).then(|| group.clone());
         let mut head = row![
-            text(tr(&group).to_string()).size(14).font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT }),
+            text(tr(&group).to_string()).size(14).font(Font { weight: iced::font::Weight::Semibold, ..crate::fonts::SANS }),
             muted(format!("{}", list.len())),
         ]
         .spacing(8)

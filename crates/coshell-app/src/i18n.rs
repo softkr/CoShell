@@ -124,7 +124,12 @@ mod tests {
     }
 
     /// Strings that are not shown translated: a language's own name, and search keywords.
-    const NOT_TRANSLATED: [&str; 6] = [
+    const NOT_TRANSLATED: [&str; 11] = [
+        "ai 새 대화 new chat",
+        "ai 출력 첨부 attach output",
+        "ai 코파일럿 헬스체크 진단 health check",
+        "포트 터널 tunnel port forward",
+        "터미널 화면 지우기 clear",
         "한국어",
         "새 로컬 셸 new local shell",
         "새 서버 추가 new server host",

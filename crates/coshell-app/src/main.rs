@@ -6,7 +6,11 @@
 mod ai;
 mod app;
 mod assist;
+mod blocks;
+mod metrics;
 mod conn;
+mod fonts;
+mod hangul;
 mod hosts;
 mod i18n;
 mod icons;
@@ -24,6 +28,8 @@ mod ui_hosts;
 mod ui_keys;
 mod ui_servers;
 mod ui_settings;
+mod ui_sidebar;
+mod ui_term;
 mod ui_tunnel;
 mod update;
 #[cfg(test)]
@@ -37,18 +43,16 @@ use launch::Launch;
 /// App version (workspace `version` in Cargo.toml).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// macOS: hide the native title bar and draw our tab bar in its place
-/// (traffic lights stay; the tab bar handles dragging / zoom).
+/// No native title bar on any platform: the header draws the brand, the session pill and
+/// its own minimise / maximise / close buttons, and handles dragging and zoom.
 fn window_settings(size: settings::WindowSize) -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(size.width, size.height),
         icon: icons::window_icon(),
+        // The system's own window controls. On macOS they sit in the app's header
+        // (transparent title bar); elsewhere the usual title bar.
         #[cfg(target_os = "macos")]
-        platform_specific: iced::window::settings::PlatformSpecific {
-            title_hidden: true,
-            titlebar_transparent: true,
-            fullsize_content_view: true,
-        },
+        platform_specific: iced::window::settings::PlatformSpecific { title_hidden: true, titlebar_transparent: true, fullsize_content_view: true },
         ..Default::default()
     }
 }
@@ -89,8 +93,17 @@ fn main() -> iced::Result {
         ui::view,
     )
     .title(CoShell::title)
+    .font(fonts::FILES[0])
+    .font(fonts::FILES[1])
+    .font(fonts::FILES[2])
+    .font(fonts::FILES[3])
+    .font(fonts::FILES[4])
+    .font(fonts::FILES[5])
+    .font(fonts::FILES[6])
+    .font(fonts::FILES[7])
     .subscription(CoShell::subscription)
     .window(window_settings(window))
+    .default_font(fonts::SANS)
     .theme(|_: &CoShell| iced::Theme::Dark)
     // The window background and default text colour: also what shows behind
     // anything transparent, so it must be ours rather than the stock grey.

@@ -40,7 +40,7 @@ fn label<'a>(s: &'a str) -> El<'a> {
 }
 
 fn section<'a>(title: &'a str) -> El<'a> {
-    text(title).size(12.5).font(Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT }).into()
+    text(title).size(12.5).font(Font { weight: iced::font::Weight::Semibold, ..crate::fonts::SANS }).into()
 }
 
 /// One-of-many buttons.
@@ -65,7 +65,7 @@ fn number<'a>(value: &'a str, on_input: fn(String) -> Message) -> El<'a> {
     text_input("", value)
         .on_input(on_input)
         .on_submit(Message::SettingsSave)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::MONO)
         .size(12)
         .padding([6, 10])
         .width(NUMBER_W)

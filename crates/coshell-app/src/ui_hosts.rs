@@ -2,7 +2,7 @@
 
 use crate::i18n::{tf, tr};
 use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text, text_input};
-use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
+use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::ai::Attachment;
 use crate::app::{CoShell, HostEditor, HostField, Message};
@@ -62,7 +62,7 @@ fn field<'a>(label: &'a str, placeholder: &'a str, value: &'a str, f: HostField)
         text_input(placeholder, value)
             .on_input(move |v| Message::HostField(f, v))
             .on_submit(Message::HostSave(false))
-            .font(Font::MONOSPACE)
+            .font(crate::fonts::MONO)
             .size(12)
             .padding([6, 10])
             .style(input_style),
@@ -80,7 +80,7 @@ fn password_field(ed: &HostEditor) -> El<'_> {
         .on_input(|v| Message::HostField(HostField::Password, v))
         .on_submit(Message::HostSave(false))
         .secure(true)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::MONO)
         .size(12)
         .padding([6, 10])
         .style(input_style);

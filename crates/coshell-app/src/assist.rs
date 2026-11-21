@@ -1,7 +1,6 @@
 //! AI-side helpers: command risk (decided locally, never by the model),
 //! fenced-code extraction, system prompt and attachment framing.
 
-use crate::i18n::tr;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -16,15 +15,6 @@ pub enum Risk {
     High,
 }
 
-impl Risk {
-    pub fn label(self) -> &'static str {
-        match self {
-            Risk::Low => tr("조회"),
-            Risk::Mid => tr("변경"),
-            Risk::High => tr("위험"),
-        }
-    }
-}
 
 static HIGH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(

@@ -18,20 +18,28 @@ macro_rules! svg_handle {
 }
 
 svg_handle!(APP, "svg/coshell-app.svg");
-svg_handle!(AI_SPARK, "features/ai-spark.svg");
 svg_handle!(PORT_FORWARDING, "features/port-forwarding.svg");
 svg_handle!(SAFE_GUARD, "features/safe-guard.svg");
 svg_handle!(API_BRIDGE, "features/api-bridge.svg");
 // Symbolic UI icons (drawn black, tinted where used).
-svg_handle!(NEW_CHAT, "icons/new-chat.svg");
-svg_handle!(PAPERCLIP, "icons/paperclip.svg");
 svg_handle!(SEND, "icons/send.svg");
 svg_handle!(STOP, "icons/stop.svg");
 svg_handle!(COPY, "icons/copy.svg");
 svg_handle!(KEY, "icons/key.svg");
-svg_handle!(PLAY, "icons/play.svg");
 svg_handle!(ZAP, "icons/zap.svg");
 svg_handle!(TRASH, "icons/trash.svg");
+svg_handle!(SEARCH, "icons/search.svg");
+svg_handle!(DOWNLOAD, "icons/download.svg");
+svg_handle!(SPARKLES, "icons/sparkles.svg");
+svg_handle!(SERVER, "icons/server.svg");
+svg_handle!(LOCK, "icons/lock.svg");
+svg_handle!(LOCK_OPEN, "icons/lock-open.svg");
+svg_handle!(USER, "icons/user.svg");
+svg_handle!(PENCIL, "icons/pencil.svg");
+svg_handle!(PLUS, "icons/plus.svg");
+svg_handle!(CHEVRON_DOWN, "icons/chevron-down.svg");
+svg_handle!(X, "icons/x.svg");
+svg_handle!(CHECK, "icons/check.svg");
 
 /// 256px PNG for the window / taskbar icon (Windows, Linux; macOS uses the bundle's .icns).
 const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");

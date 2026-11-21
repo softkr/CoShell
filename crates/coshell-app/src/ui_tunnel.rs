@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use coshell_ssh::ForwardSpec;
 use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
-use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
+use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::app::{CoShell, Message, Tab, TunnelEntry, TunnelField, TunnelForm, TunnelState, form_spec};
 use crate::theme::{self, alpha};
@@ -180,7 +180,7 @@ fn port_input<'a>(label: &'a str, placeholder: &'a str, value: &'a str, f: Tunne
         text_input(placeholder, value)
             .on_input(move |v| Message::TunnelField(f, v))
             .on_submit(Message::TunnelAdd)
-            .font(Font::MONOSPACE)
+            .font(crate::fonts::MONO)
             .size(12)
             .padding([5, 8])
             .style(input_style),
