@@ -13,7 +13,7 @@ use crate::ai::{AI_INPUT, Chat, Exec, ExecState, Settings, Turn};
 use crate::app::{CoShell, Message, Phase, Tab, TabId};
 use crate::assist::{self, Risk, Segment};
 use crate::theme::{self, alpha};
-use crate::icons::{CHECK, COPY, PENCIL, SEND, STOP, USER, X, ZAP};
+use crate::icons::{CHECK, COPY, PENCIL, SEND, STOP, X, ZAP};
 use crate::ui::{BAR_H, Btn, El, SEMIBOLD, btn, icon_btn, input_style, kbd, mono, muted, rule, tip};
 
 /// The first code block's run button (tests click it by this id).
@@ -93,7 +93,6 @@ fn tab_choice(t: &Tab) -> TabChoice {
     TabChoice { id: t.id, label }
 }
 
-const MONO_BOLD: Font = crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Bold);
 
 pub fn panel(app: &CoShell) -> El<'_> {
     let tab = app.active_tab();
@@ -125,7 +124,7 @@ pub fn panel(app: &CoShell) -> El<'_> {
     .align_y(Alignment::Center);
     if let Some(t) = tab {
         let sessions: Vec<TabChoice> = app.tabs.iter().map(tab_choice).collect();
-        let dot_color = if t.env == crate::hosts::Env::Prod { theme::WARN } else { theme::ACCENT_TX };
+        let dot_color = if t.env == crate::hosts::Env::Prod { theme::WARN } else { theme::OK };
         let select = pick_list(sessions, Some(tab_choice(t)), |c: TabChoice| Message::Activate(c.id))
             .text_size(12)
             .font(crate::ui::MEDIUM)
@@ -168,29 +167,16 @@ pub fn panel(app: &CoShell) -> El<'_> {
         .into()
 }
 
-const AVATAR: f32 = 28.0;
+const AVATAR: f32 = 24.0;
 
-/// The AI's `>_` square.
+/// The assistant's mark: an iridescent ring around a small disc.
 fn ai_avatar<'a>() -> El<'a> {
-    container(text(">_").size(11).font(MONO_BOLD).color(theme::ACCENT_TX))
-        .center(AVATAR)
-        .style(|_| container::Style {
-            background: Some(Background::Color(alpha(theme::ACCENT, 0.15))),
-            border: Border { color: alpha(theme::ACCENT, 0.3), width: 1.0, radius: crate::ui::R_CONTROL.into() },
-            ..Default::default()
-        })
-        .into()
-}
-
-fn user_avatar<'a>() -> El<'a> {
-    container(crate::icons::tinted(&USER, 14.0, theme::TEXT_2))
-        .center(AVATAR)
-        .style(|_| container::Style {
-            background: Some(Background::Color(theme::BG_2)),
-            border: Border { color: theme::LINE_2, width: 1.0, radius: crate::ui::R_CONTROL.into() },
-            ..Default::default()
-        })
-        .into()
+    let hole = container(crate::ui::orb(8.0)).center(AVATAR - 3.0).style(|_| container::Style {
+        background: Some(Background::Color(theme::BG_1)),
+        border: Border { radius: 999.0.into(), ..Default::default() },
+        ..Default::default()
+    });
+    iced::widget::stack![crate::ui::orb(AVATAR), container(hole).center(AVATAR)].into()
 }
 
 /// Message bubble: `bg` fill, thin border, rounded.
@@ -200,7 +186,7 @@ fn bubble<'a>(content: impl Into<El<'a>>, bg: Color) -> El<'a> {
         .width(Length::Fill)
         .style(move |_| container::Style {
             background: Some(Background::Color(bg)),
-            border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_CARD.into() },
+            border: Border { color: theme::LINE, width: 1.0, radius: iced::border::Radius { top_left: 6.0, top_right: 16.0, bottom_right: 16.0, bottom_left: 16.0 } },
             text_color: Some(theme::TEXT),
             ..Default::default()
         })
@@ -255,7 +241,7 @@ fn welcome(tab: &Tab) -> El<'_> {
                     let hover = matches!(st, iced::widget::button::Status::Hovered);
                     iced::widget::button::Style {
                         background: Some(Background::Color(if hover { theme::BG_3 } else { alpha(theme::BG_2, 0.6) })),
-                        text_color: if hover { theme::EMERALD_300 } else { theme::TEXT },
+                        text_color: if hover { theme::ACCENT_HI } else { theme::TEXT },
                         border: Border { color: if hover { theme::LINE_2 } else { theme::LINE }, width: 1.0, radius: crate::ui::R_CARD.into() },
                         ..Default::default()
                     }
@@ -283,7 +269,7 @@ fn chips(tab: &Tab) -> El<'_> {
                 let hover = matches!(st, button::Status::Hovered);
                 button::Style {
                     background: Some(Background::Color(if hover { theme::BG_3 } else { theme::BG_2 })),
-                    text_color: if hover { theme::EMERALD_300 } else { theme::SLATE_300 },
+                    text_color: if hover { theme::ACCENT_HI } else { theme::SLATE_300 },
                     border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_PILL.into() },
                     ..Default::default()
                 }
@@ -307,13 +293,23 @@ fn chip<'a>(label: String) -> El<'a> {
         .into()
 }
 
+/// Widest a question's bubble gets before it wraps.
+const USER_BUBBLE_W: f32 = 300.0;
+
 fn user_turn(t: &Turn) -> El<'_> {
     let mut col = column![].spacing(6);
     if let Some(a) = &t.attachment {
         col = col.push(chip(format!("📎 {a}")));
     }
-    col = col.push(text(t.text.clone()).size(13).color(theme::TEXT).line_height(1.625));
-    row![user_avatar(), bubble(col, alpha(theme::BG_2, 0.8))].spacing(10).into()
+    col = col.push(text(t.text.clone()).size(13).color(theme::ON_ACCENT).line_height(1.625));
+    // The user's side: an accent bubble on the right, as wide as its text.
+    let bubble = container(col).padding([9, 14]).max_width(USER_BUBBLE_W).style(|_| container::Style {
+        background: Some(Background::Color(theme::ACCENT)),
+        border: Border { radius: iced::border::Radius { top_left: 16.0, top_right: 6.0, bottom_right: 16.0, bottom_left: 16.0 }, ..Default::default() },
+        text_color: Some(theme::ON_ACCENT),
+        ..Default::default()
+    });
+    row![Space::new().width(Length::Fill), bubble].into()
 }
 
 const BOLD: Font = Font { weight: iced::font::Weight::Semibold, ..crate::fonts::SANS };
@@ -458,7 +454,7 @@ fn card_btn<'a>(content: impl Into<El<'a>>, msg: Option<Message>) -> button::But
         let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
         button::Style {
             background: Some(Background::Color(if hover { theme::BG_3 } else { theme::BG_2 })),
-            text_color: if hover { theme::EMERALD_300 } else { theme::SLATE_300 },
+            text_color: if hover { theme::ACCENT_HI } else { theme::SLATE_300 },
             border: Border { color: theme::LINE, width: 1.0, radius: 6.0.into() },
             ..Default::default()
         }
@@ -470,7 +466,7 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a>
     let (color, status, done) = match &e.state {
         ExecState::Running => (theme::INFO, tr("실행 중…").to_string(), false),
         ExecState::Typed => (theme::TEXT_2, tr("터미널에 입력함").to_string(), false),
-        ExecState::Done { exit: Some(0) | None, .. } => (theme::ACCENT_TX, tr("실행 완료").to_string(), true),
+        ExecState::Done { exit: Some(0) | None, .. } => (theme::OK, tr("실행 완료").to_string(), true),
         ExecState::Done { exit: Some(code), .. } => (theme::WARN, tf("종료 코드 {0}", &[code]), true),
         ExecState::Failed(_) => (theme::ERR_TX, tr("실행하지 못함").to_string(), false),
     };
@@ -557,7 +553,7 @@ fn assistant_turn<'a>(tab: &'a Tab, index: usize, t: &'a Turn, streaming: bool, 
     }
     let mut col = column![].spacing(8);
     if !prose_text.is_empty() {
-        col = col.push(bubble(prose(&prose_text.join("\n\n")), alpha(theme::BG_2, 0.6)));
+        col = col.push(bubble(prose(&prose_text.join("\n\n")), theme::CARD));
     }
     if streaming && t.text.trim().is_empty() {
         col = col.push(

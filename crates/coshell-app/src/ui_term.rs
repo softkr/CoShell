@@ -10,11 +10,13 @@ use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 use crate::app::{ASK_INPUT, CoShell, Message, SEARCH_INPUT, Tab};
 use crate::blocks::{self, Block, Mark, Prompt, Screen, Source};
 use crate::fonts::MONO;
-use crate::icons::{COPY, SEARCH, SPARKLES, X};
+use crate::icons::{COPY, SEARCH, SEND, X};
 use crate::theme::{self, alpha};
-use crate::ui::{El, R_CARD, kbd, mono};
+use crate::ui::{El, kbd, mono};
 
 const TEXT: f32 = 13.0;
+/// Command cards and the composer dock.
+const R_DOCK: f32 = 16.0;
 /// Output line height (the design's `leading-6`).
 const OUTPUT_LINE_H: f32 = 24.0;
 const MONO_SEMIBOLD: Font = crate::fonts::weight(MONO, iced::font::Weight::Semibold);
@@ -23,22 +25,19 @@ const MONO_MEDIUM: Font = crate::fonts::weight(MONO, iced::font::Weight::Medium)
 fn badge<'a>(source: Source) -> El<'a> {
     let (content, bg, line, fg): (El<'a>, Color, Color, Color) = match source {
         Source::Ai => (
-            row![crate::icons::tinted(&SPARKLES, 12.0, theme::ACCENT_TX), text("AI").size(11).font(crate::ui::MEDIUM).color(theme::ACCENT_TX)]
-                .spacing(4)
-                .align_y(Alignment::Center)
-                .into(),
-            alpha(theme::ACCENT, 0.15),
-            alpha(theme::ACCENT, 0.3),
-            theme::ACCENT_TX,
+            row![crate::ui::orb(8.0), text("AI").size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center).into(),
+            alpha(theme::PURPLE, 0.12),
+            alpha(theme::PURPLE, 0.25),
+            theme::PURPLE,
         ),
-        Source::User => (text(tr("사용자")).size(11).font(crate::ui::MEDIUM).color(theme::SLATE_300).into(), theme::BG_2, theme::LINE_2, theme::SLATE_300),
+        Source::User => (text(tr("사용자")).size(10.5).font(crate::ui::MEDIUM).color(theme::TEXT_2).into(), theme::CHIP, Color::TRANSPARENT, theme::TEXT_2),
     };
     let _ = fg;
     container(content)
         .padding([2, 8])
         .style(move |_| container::Style {
             background: Some(Background::Color(bg)),
-            border: Border { color: line, width: 1.0, radius: 6.0.into() },
+            border: Border { color: line, width: 1.0, radius: crate::ui::R_PILL.into() },
             ..Default::default()
         })
         .into()
@@ -46,11 +45,11 @@ fn badge<'a>(source: Source) -> El<'a> {
 
 /// `user@host : cwd $` as the design draws it.
 fn prompt_parts<'a>(p: &Prompt) -> Vec<El<'a>> {
-    let mut parts: Vec<El<'a>> = vec![text(p.user_host.clone()).size(TEXT).font(MONO_SEMIBOLD).color(theme::ACCENT_TX).into()];
+    let mut parts: Vec<El<'a>> = vec![text(p.user_host.clone()).size(TEXT).font(MONO_SEMIBOLD).color(theme::OK).into()];
     if !p.sym.is_empty() {
         parts.push(mono(":", TEXT, theme::TEXT_3));
         parts.push(mono(if p.cwd.is_empty() { "~".to_string() } else { p.cwd.clone() }, TEXT, theme::INFO));
-        parts.push(mono(p.sym.clone(), TEXT, theme::SLATE_300));
+        parts.push(mono(p.sym.clone(), TEXT, theme::TEXT_2));
     }
     parts
 }
@@ -62,11 +61,11 @@ fn output_text<'a>(lines: &[String], query: &str) -> El<'a> {
         .map(|(s, m)| {
             let sp = span(s);
             match m {
-                Mark::Plain => sp.color(alpha(theme::SLATE_300, 0.9)),
+                Mark::Plain => sp.color(alpha(theme::TEXT, 0.9)),
                 Mark::High | Mark::Warn => sp.color(theme::WARN).font(MONO_SEMIBOLD),
                 Mark::Err => sp.color(theme::ERR_TX).font(MONO_SEMIBOLD),
-                Mark::Ok => sp.color(theme::ACCENT_TX).font(MONO_MEDIUM),
-                Mark::Path => sp.color(alpha(theme::SKY_300, 0.9)),
+                Mark::Ok => sp.color(theme::OK).font(MONO_MEDIUM),
+                Mark::Path => sp.color(theme::INFO),
                 Mark::Found => sp.color(theme::AMBER_200).background(alpha(theme::WARN, 0.3)),
             }
         })
@@ -78,14 +77,14 @@ fn output_text<'a>(lines: &[String], query: &str) -> El<'a> {
 
 fn small_btn<'a>(content: impl Into<El<'a>>, msg: Message) -> El<'a> {
     button(content)
-        .padding([2, 8])
+        .padding([3, 10])
         .on_press(msg)
         .style(|_, st| {
             let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
             button::Style {
-                background: Some(Background::Color(if hover { alpha(theme::ACCENT, 0.2) } else { theme::BG_2 })),
-                text_color: if hover { theme::ACCENT_TX } else { theme::SLATE_300 },
-                border: Border { color: theme::LINE, width: 1.0, radius: 4.0.into() },
+                background: Some(Background::Color(if hover { theme::ACCENT } else { alpha(theme::ACCENT, 0.12) })),
+                text_color: if hover { theme::ON_ACCENT } else { theme::ACCENT_TX },
+                border: Border { radius: crate::ui::R_PILL.into(), ..Default::default() },
                 ..Default::default()
             }
         })
@@ -107,10 +106,10 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
             None => {}
         }
         if let Some(code) = m.exit {
-            let (fg, bg) = if code == 0 { (alpha(theme::ACCENT_TX, 0.8), alpha(theme::ACCENT, 0.1)) } else { (theme::ERR_TX, alpha(theme::ERR, 0.1)) };
-            info = info.push(container(mono(format!("exit {code}"), 10.0, fg)).padding([0, 4]).style(move |_| container::Style {
+            let (fg, bg) = if code == 0 { (theme::OK, alpha(theme::OK, 0.12)) } else { (theme::ERR_TX, alpha(theme::ERR, 0.1)) };
+            info = info.push(container(mono(format!("exit {code}"), 10.0, fg)).padding([1, 6]).style(move |_| container::Style {
                 background: Some(Background::Color(bg)),
-                border: Border { radius: 3.0.into(), ..Default::default() },
+                border: Border { radius: 6.0.into(), ..Default::default() },
                 ..Default::default()
             }));
         }
@@ -122,11 +121,11 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
         row![
             small_btn(text(tr("AI 분석")).size(10), Message::BlockAsk(tab.id, b.cmd.clone(), output.clone())),
             button(crate::icons::tinted(&COPY, 12.0, theme::TEXT_2))
-                .padding(4)
+                .padding(5)
                 .on_press(Message::AiCopy(format!("{}\n{}", b.cmd, output)))
                 .style(|_, st| button::Style {
-                    background: Some(Background::Color(if matches!(st, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
-                    border: Border { color: theme::LINE, width: 1.0, radius: 4.0.into() },
+                    background: Some(Background::Color(if matches!(st, button::Status::Hovered) { alpha(Color::WHITE, 0.15) } else { theme::CHIP })),
+                    border: Border { radius: crate::ui::R_PILL.into(), ..Default::default() },
                     ..Default::default()
                 }),
         ]
@@ -138,13 +137,13 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
     };
     right = right.push(actions);
     head = head.push(right);
-    let mut col = column![head].spacing(8);
+    let mut col = column![head].spacing(10);
     if !b.output.iter().all(|l| l.trim().is_empty()) {
         col = col.push(output_text(&b.output, query));
     }
-    let card = container(col).padding(10).width(Length::Fill).style(move |_| container::Style {
-        background: hovered.then_some(Background::Color(alpha(theme::BG_1, 0.35))),
-        border: Border { color: if hovered { alpha(theme::LINE, 0.6) } else { Color::TRANSPARENT }, width: 1.0, radius: R_CARD.into() },
+    let card = container(col).padding(16).width(Length::Fill).style(move |_| container::Style {
+        background: Some(Background::Color(theme::CARD)),
+        border: Border { color: if hovered { theme::LINE_2 } else { theme::LINE }, width: 1.0, radius: R_DOCK.into() },
         ..Default::default()
     });
     mouse_area(card).on_enter(Message::BlockHover(Some(i))).on_exit(Message::BlockHover(None)).into()
@@ -157,9 +156,9 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
     let mut r = row![].spacing(6).align_y(Alignment::Center);
     if ai_mode {
         r = r.push(
-            container(text(tr("AI 질문")).size(10).font(crate::ui::SEMIBOLD).color(theme::EMERALD_300)).padding([1, 6]).style(|_| container::Style {
-                background: Some(Background::Color(alpha(theme::ACCENT, 0.2))),
-                border: Border { color: alpha(theme::ACCENT, 0.4), width: 1.0, radius: 4.0.into() },
+            container(row![crate::ui::orb(8.0), text(tr("AI 질문")).size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center)).padding([2, 8]).style(|_| container::Style {
+                background: Some(Background::Color(alpha(theme::PURPLE, 0.15))),
+                border: Border { color: alpha(theme::PURPLE, 0.3), width: 1.0, radius: crate::ui::R_PILL.into() },
                 ..Default::default()
             }),
         );
@@ -186,7 +185,7 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
                 .style(|t, st| text_input::Style { value: theme::SLATE_100, ..crate::ui::bare_input_style(t, st) }),
         );
     } else if typed.is_empty() {
-        line = line.push(caret()).push(mono(tr("명령어 입력 (Tab 자동완성 · '#'으로 바로 AI 질문)..."), TEXT, alpha(theme::TEXT_3, 0.7)));
+        line = line.push(caret()).push(mono(tr("명령어 입력 (Tab 자동완성 · '#'으로 바로 AI 질문)..."), TEXT, theme::TEXT_3));
     } else {
         line = line.push(mono(before, TEXT, theme::SLATE_100)).push(caret()).push(mono(after, TEXT, theme::SLATE_100));
         if let Some(g) = &ghost {
@@ -199,13 +198,24 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
     } else if ghost.is_some() {
         r = r.push(kbd("Tab ⇥"));
     }
-    let focused = app.terminal_active(tab);
+    // Return: sends the question, or Enter to the shell.
+    let send = button(container(crate::icons::tinted(&SEND, 13.0, theme::ON_ACCENT)).center(28))
+        .padding(0)
+        .on_press(if asking.is_some() { Message::AskSubmit } else { Message::Input(tab.id, b"\r".to_vec()) })
+        .style(|_, st| button::Style {
+            background: Some(Background::Color(alpha(theme::ACCENT, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.88 } else { 1.0 }))),
+            border: Border { radius: 10.0.into(), ..Default::default() },
+            ..Default::default()
+        });
+    r = r.push(send);
+    let focused = app.terminal_active(tab) || asking.is_some();
     container(r)
-        .padding([8, 10])
+        .padding(Padding { top: 8.0, right: 8.0, bottom: 8.0, left: 14.0 })
         .width(Length::Fill)
         .style(move |_| container::Style {
-            background: focused.then_some(Background::Color(alpha(theme::BG_1, 0.4))),
-            border: Border { color: if focused { theme::LINE } else { Color::TRANSPARENT }, width: 1.0, radius: R_CARD.into() },
+            background: Some(Background::Color(theme::BG_2)),
+            border: Border { color: if focused { alpha(theme::ACCENT, 0.45) } else { theme::LINE }, width: if focused { 1.5 } else { 1.0 }, radius: R_DOCK.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.3), offset: iced::Vector::new(0.0, 6.0), blur_radius: 18.0 },
             ..Default::default()
         })
         .into()
@@ -230,7 +240,7 @@ fn search_strip<'a>(query: &'a str, shown: usize, total: usize) -> El<'a> {
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    column![container(strip).padding([8, 16]).width(Length::Fill).style(crate::ui::fill(alpha(theme::BG_1, 0.95))), crate::ui::rule(true)].into()
+    column![container(strip).padding([8, 16]).width(Length::Fill).style(crate::ui::fill(theme::BG_1)), crate::ui::rule(true)].into()
 }
 
 pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
@@ -239,7 +249,7 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
     let metas = blocks::match_metas(&screen.blocks, &tab.metas);
     let running = screen.running();
     let last = screen.blocks.len().saturating_sub(1);
-    let mut col = column![].spacing(24).width(Length::Fill);
+    let mut col = column![].spacing(16).width(Length::Fill);
     if !screen.preamble.iter().all(|l| l.trim().is_empty()) && q.is_empty() {
         col = col.push(container(output_text(&screen.preamble, "")).padding(10));
     }
@@ -258,15 +268,15 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
                 .padding([40, 0]),
         );
     }
-    if let Some((p, typed)) = &screen.current {
+    let dock = screen.current.as_ref().map(|(p, typed)| {
         let tail = match &tab.phase {
             crate::app::Phase::Live(s) => blocks::cursor_tail(s.term()),
             _ => 0,
         };
-        col = col.push(prompt_row(app, tab, p, typed, tail));
-    }
-    col = col.push(Space::new().height(48));
-    let body = scrollable(container(col).padding(Padding { top: 20.0, right: 24.0, bottom: 0.0, left: 24.0 }).width(Length::Fill))
+        container(prompt_row(app, tab, p, typed, tail)).padding(Padding { top: 8.0, right: 28.0, bottom: 16.0, left: 28.0 })
+    });
+    col = col.push(Space::new().height(24));
+    let body = scrollable(container(col).padding(Padding { top: 24.0, right: 28.0, bottom: 0.0, left: 28.0 }).width(Length::Fill))
         .anchor_bottom()
         .height(Length::Fill)
         .width(Length::Fill);
@@ -276,7 +286,11 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
     if app.search.is_some() {
         layers = layers.push(search_strip(query, shown, screen.blocks.len()));
     }
-    container(layers.push(body))
+    layers = layers.push(body);
+    if let Some(d) = dock {
+        layers = layers.push(d);
+    }
+    container(layers)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_| container::Style { background: Some(Background::Color(theme::BG_0)), text_color: Some(theme::TEXT), ..Default::default() })

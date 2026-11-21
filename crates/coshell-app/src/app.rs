@@ -380,8 +380,6 @@ pub struct CoShell {
     resizing: Option<Divider>,
     /// Left sidebar: servers or snippets.
     pub sidebar_tab: SidebarTab,
-    /// Server search box in the sidebar is shown.
-    pub sidebar_search: bool,
     /// Collapsed server groups in the sidebar.
     pub collapsed_groups: Vec<String>,
     /// Block under the pointer in the block view.
@@ -483,7 +481,6 @@ pub enum Message {
     /// Show / hide the status bar.
     StatusBarToggle,
     SidebarTab(SidebarTab),
-    SidebarSearch,
     /// Fold / unfold a server group in the sidebar.
     GroupToggle(String),
     /// A built-in snippet: (index, run it = type + Enter; otherwise only type it).
@@ -798,7 +795,6 @@ impl CoShell {
             last_tab_click: None,
             resizing: None,
             sidebar_tab: SidebarTab::Servers,
-            sidebar_search: false,
             collapsed_groups: Vec::new(),
             prod_guard: true,
             block_hover: None,
@@ -1813,16 +1809,6 @@ impl CoShell {
             Message::SidebarTab(t) => {
                 self.sidebar_tab = t;
                 Task::none()
-            }
-            Message::SidebarSearch => {
-                self.sidebar_search = !self.sidebar_search;
-                if self.sidebar_search {
-                    self.term_focus = (self.term_focus.0 + 1, false);
-                    iced::widget::operation::focus(SIDEBAR_SEARCH_INPUT)
-                } else {
-                    self.host_filter.clear();
-                    self.focus_terminal()
-                }
             }
             Message::GroupToggle(g) => {
                 match self.collapsed_groups.iter().position(|x| *x == g) {

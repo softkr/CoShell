@@ -7,9 +7,9 @@ use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::app::{CoShell, Message, Phase, SIDEBAR_SEARCH_INPUT, SidebarTab};
 use crate::hosts::Env;
-use crate::icons::{CHEVRON_DOWN, PLUS, SEARCH, SERVER};
+use crate::icons::{CHEVRON_DOWN, PLUS, SEARCH};
 use crate::theme::{self, alpha};
-use crate::ui::{BAR_H, Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn_style, dot, fill, input_style, kbd, mono, muted, rule};
+use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn_style, dot, fill, kbd, mono, muted};
 
 /// A ready-made read-only command: typed into the terminal, optionally with Enter.
 pub struct Snippet {
@@ -33,43 +33,39 @@ pub fn sidebar(app: &CoShell) -> El<'_> {
         SidebarTab::Servers => servers(app),
         SidebarTab::Snippets => snippets(app),
     };
-    let mut col = column![head(app), rule(true)];
-    if app.sidebar_search {
-        col = col.push(
-            container(
-                text_input(tr("호스트명, IP 검색..."), &app.host_filter)
-                    .id(SIDEBAR_SEARCH_INPUT)
-                    .on_input(Message::HostFilter)
-                    .size(12)
-                    .padding([6, 10])
-                    .style(|t, st| {
-                        let mut s = input_style(t, st);
-                        s.background = Background::Color(theme::BG_2);
-                        s
-                    }),
-            )
-            .padding([8, 12])
-            .style(fill(alpha(theme::BG_0, 0.5))),
-        );
-        col = col.push(rule(true));
-    }
-    col = col.push(scrollable(container(content).padding(10)).height(Length::Fill));
+    // The search field is always there, like Finder's.
+    let field = text_input(tr("호스트명, IP 검색..."), &app.host_filter)
+        .id(SIDEBAR_SEARCH_INPUT)
+        .on_input(Message::HostFilter)
+        .size(12)
+        .padding(0)
+        .style(crate::ui::bare_input_style);
+    let search = container(row![crate::icons::tinted(&SEARCH, 13.0, theme::TEXT_3), field].spacing(7).align_y(Alignment::Center))
+        .padding([7, 10])
+        .style(|_| container::Style {
+            background: Some(Background::Color(alpha(Color::WHITE, 0.06))),
+            border: Border { radius: crate::ui::R_ROW.into(), ..Default::default() },
+            ..Default::default()
+        });
+    let mut col = column![head(app), container(search).padding(Padding { top: 0.0, right: 12.0, bottom: 10.0, left: 12.0 })];
+    col = col.push(scrollable(container(content).padding(Padding { top: 0.0, right: 10.0, bottom: 8.0, left: 10.0 })).height(Length::Fill));
     if let Some(card) = resource_card(app) {
-        col = col.push(container(card).padding(Padding { top: 0.0, right: 10.0, bottom: 10.0, left: 10.0 }));
+        col = col.push(container(card).padding(Padding { top: 0.0, right: 12.0, bottom: 12.0, left: 12.0 }));
     }
-    col = col.push(rule(true)).push(footer(app));
-    container(col).width(app.settings.sidebar_width).height(Length::Fill).style(fill(theme::BG_1)).into()
+    col = col.push(crate::ui::rule(true)).push(footer(app));
+    container(col).width(app.settings.sidebar_width).height(Length::Fill).style(fill(theme::SIDEBAR)).into()
 }
 
 /// Segmented 서버 | 스니펫 switch, then add and search.
 fn head(app: &CoShell) -> El<'_> {
     let seg = |label: &'static str, t: SidebarTab| {
         let on = app.sidebar_tab == t;
-        button(text(tr(label)).size(11).font(if on { SEMIBOLD } else { crate::ui::MEDIUM }))
+        button(container(text(tr(label)).size(11.5).font(if on { SEMIBOLD } else { crate::ui::MEDIUM })).center_x(Length::Fill))
+            .width(Length::Fill)
             .padding([4, 10])
             .on_press(Message::SidebarTab(t))
             .style(move |_, st| button::Style {
-                background: on.then_some(Background::Color(theme::BG_2)),
+                background: on.then_some(Background::Color(alpha(Color::WHITE, 0.16))),
                 text_color: if on { theme::SLATE_100 } else if matches!(st, button::Status::Hovered) { theme::TEXT } else { theme::TEXT_2 },
                 border: Border { radius: 6.0.into(), ..Default::default() },
                 shadow: if on {
@@ -80,15 +76,15 @@ fn head(app: &CoShell) -> El<'_> {
                 ..Default::default()
             })
     };
-    let switch = container(row![seg("서버", SidebarTab::Servers), seg("스니펫", SidebarTab::Snippets)]).padding(2).style(|_| container::Style {
-        background: Some(Background::Color(theme::BG_0)),
-        border: Border { color: theme::LINE, width: 1.0, radius: R_CONTROL.into() },
+    let switch = container(row![seg("서버", SidebarTab::Servers), seg("스니펫", SidebarTab::Snippets)]).padding(2).width(Length::Fill).style(|_| container::Style {
+        background: Some(Background::Color(alpha(Color::WHITE, 0.07))),
+        border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_ROW.into() },
         ..Default::default()
     });
     let icon = |h: &'static std::sync::LazyLock<iced::widget::svg::Handle>, size: f32, label: &'static str, msg: Message| -> El<'static> {
-        let b = button(crate::icons::tinted(h, size, theme::TEXT_2)).padding(6).on_press(msg).style(|_, st| button::Style {
-            background: matches!(st, button::Status::Hovered).then_some(Background::Color(theme::BG_3)),
-            border: Border { radius: 6.0.into(), ..Default::default() },
+        let b = button(container(crate::icons::tinted(h, size, theme::TEXT_2)).center(28)).padding(0).on_press(msg).style(|_, st| button::Style {
+            background: Some(Background::Color(if matches!(st, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
+            border: Border { color: theme::LINE, width: 1.0, radius: R_CONTROL.into() },
             ..Default::default()
         });
         crate::ui::tip(b, label, iced::widget::tooltip::Position::Bottom)
@@ -96,16 +92,12 @@ fn head(app: &CoShell) -> El<'_> {
     container(
         row![
             switch,
-            Space::new().width(Length::Fill),
             icon(&PLUS, 16.0, tr("새 호스트 추가"), Message::HostNewIn(None)),
-            icon(&SEARCH, 14.0, tr("호스트 검색"), Message::SidebarSearch),
         ]
-        .spacing(2)
+        .spacing(8)
         .align_y(Alignment::Center),
     )
-    .padding([0, 10])
-    .height(BAR_H - 1.0)
-    .center_y(BAR_H - 1.0)
+    .padding(Padding { top: 12.0, right: 12.0, bottom: 10.0, left: 12.0 })
     .into()
 }
 
@@ -122,7 +114,7 @@ fn env_groups() -> [(Env, &'static str, Color); 4] {
     [
         (Env::Prod, tr("운영"), theme::WARN),
         (Env::Stage, tr("스테이징"), theme::INFO),
-        (Env::Dev, tr("개발"), theme::ACCENT_TX),
+        (Env::Dev, tr("개발"), theme::OK),
         (Env::None, tr("기타"), theme::TEXT_2),
     ]
 }
@@ -131,7 +123,7 @@ fn env_groups() -> [(Env, &'static str, Color); 4] {
 fn servers(app: &CoShell) -> El<'_> {
     let q = app.host_filter.trim().to_lowercase();
     let active_alias = app.active_tab().filter(|_| !app.host_view).and_then(|t| t.alias.clone());
-    let mut col = column![].spacing(12);
+    let mut col = column![].spacing(14);
     let mut any = false;
     for (env, label, color) in env_groups() {
         let items: Vec<&coshell_ssh::config::HostEntry> = app
@@ -149,9 +141,9 @@ fn servers(app: &CoShell) -> El<'_> {
         let header = button(
             row![
                 chevron(!collapsed, color),
-                text(label).size(12).font(SEMIBOLD).color(color),
+                text(label).size(11).font(SEMIBOLD).color(theme::TEXT_3),
                 Space::new().width(Length::Fill),
-                mono(items.len().to_string(), 10.0, theme::TEXT_3),
+                text(items.len().to_string()).size(11).color(theme::TEXT_3),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -164,7 +156,7 @@ fn servers(app: &CoShell) -> El<'_> {
             border: Border { radius: 6.0.into(), ..Default::default() },
             ..Default::default()
         });
-        let mut list = column![header].spacing(4);
+        let mut list = column![header].spacing(2);
         if !collapsed {
             for e in items {
                 let alias = e.alias.clone();
@@ -175,42 +167,34 @@ fn servers(app: &CoShell) -> El<'_> {
                     None => Message::HostConnect(alias.clone()),
                 };
                 let disk = open_tab.and_then(|t| t.stats.as_ref()).map(|s| s.disk).filter(|d| *d >= 85);
-                let mut line = row![
-                    crate::icons::tinted(&SERVER, 14.0, if active { theme::ACCENT_TX } else { theme::TEXT_3 }),
-                    container(mono(app.display_of(&alias), 12.0, if active { theme::EMERALD_300 } else { theme::SLATE_300 })).width(Length::Fill).clip(true),
+                let on = |c: Color| if active { Color::WHITE } else { c };
+                let mono_medium = crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Medium);
+                let names = column![
+                    text(app.display_of(&alias)).size(12.5).font(mono_medium).color(on(theme::TEXT)).wrapping(text::Wrapping::None),
+                    text(e.host().to_string()).size(10).font(crate::fonts::MONO).color(if active { alpha(Color::WHITE, 0.75) } else { theme::TEXT_3 }).wrapping(text::Wrapping::None),
                 ]
-                .spacing(8)
-                .align_y(Alignment::Center);
+                .spacing(1);
+                let mut line = row![dot(on(color), 8.0), container(names).width(Length::Fill).clip(true)].spacing(10).align_y(Alignment::Center);
                 if let Some(d) = disk {
-                    line = line.push(container(mono(format!("{d}%"), 10.0, theme::WARN)).padding([0, 4]).style(|_| container::Style {
-                        background: Some(Background::Color(alpha(theme::WARN_500, 0.1))),
-                        border: Border { radius: 3.0.into(), ..Default::default() },
-                        ..Default::default()
-                    }));
-                }
-                if active {
-                    line = line.push(container(dot(theme::ACCENT_TX, 8.0)).style(|_| container::Style {
-                        shadow: iced::Shadow { color: alpha(theme::ACCENT_TX, 0.6), offset: iced::Vector::ZERO, blur_radius: 4.0 },
+                    line = line.push(container(mono(format!("{d}%"), 10.0, on(theme::WARN))).padding([1, 6]).style(move |_| container::Style {
+                        background: Some(Background::Color(if active { alpha(Color::WHITE, 0.2) } else { alpha(theme::WARN, 0.15) })),
+                        border: Border { radius: 999.0.into(), ..Default::default() },
                         ..Default::default()
                     }));
                 }
                 list = list.push(
-                    button(line).width(Length::Fill).padding([8, 10]).on_press(msg).style(move |_, st| {
+                    button(line).width(Length::Fill).padding([7, 10]).on_press(msg).style(move |_, st| {
                         let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
                         button::Style {
                             background: Some(Background::Color(if active {
-                                alpha(theme::ACCENT, 0.1)
+                                theme::ACCENT
                             } else if hover {
-                                theme::BG_3
+                                alpha(Color::WHITE, 0.075)
                             } else {
                                 Color::TRANSPARENT
                             })),
                             text_color: theme::TEXT,
-                            border: Border {
-                                color: if active { alpha(theme::ACCENT, 0.3) } else { Color::TRANSPARENT },
-                                width: 1.0,
-                                radius: R_CONTROL.into(),
-                            },
+                            border: Border { radius: 10.0.into(), ..Default::default() },
                             ..Default::default()
                         }
                     }),
@@ -237,8 +221,8 @@ fn snippets(app: &CoShell) -> El<'_> {
         }
         any = true;
         let tag = container(text(category).size(10).color(theme::TEXT_2)).padding([1, 6]).style(|_| container::Style {
-            background: Some(Background::Color(theme::BG_0)),
-            border: Border { color: theme::LINE, width: 1.0, radius: 4.0.into() },
+            background: Some(Background::Color(theme::CHIP)),
+            border: Border { radius: 6.0.into(), ..Default::default() },
             ..Default::default()
         });
         let small = |label: &'static str, primary: bool, msg: Option<Message>| {
@@ -249,7 +233,7 @@ fn snippets(app: &CoShell) -> El<'_> {
         };
         let card = column![
             row![text(title).size(12).font(SEMIBOLD).color(theme::TEXT).width(Length::Fill), tag].spacing(8).align_y(Alignment::Center),
-            container(mono(format!(">_ {}", sn.cmd), 11.0, alpha(theme::ACCENT_TX, 0.9))).width(Length::Fill).clip(true),
+            container(mono(format!("$ {}", sn.cmd), 11.0, theme::ACCENT_TX)).width(Length::Fill).clip(true),
             row![
                 Space::new().width(Length::Fill),
                 small("입력", false, live.then_some(Message::Snippet(i, false))),
@@ -259,7 +243,7 @@ fn snippets(app: &CoShell) -> El<'_> {
         ]
         .spacing(6);
         col = col.push(container(card).padding(10).width(Length::Fill).style(|_| container::Style {
-            background: Some(Background::Color(alpha(theme::BG_2, 0.5))),
+            background: Some(Background::Color(theme::CARD)),
             border: Border { color: theme::LINE, width: 1.0, radius: R_CARD.into() },
             ..Default::default()
         }));
@@ -284,15 +268,15 @@ fn resource_card(app: &CoShell) -> Option<El<'_>> {
         } else if val >= 70 {
             theme::INFO
         } else {
-            theme::ACCENT_TX
+            theme::OK
         };
         let value = v.map_or("—".to_string(), |x| format!("{x}%"));
         let fill_w = f32::from(val) / 100.0;
         column![
             row![
-                mono(label, 10.0, theme::TEXT_2),
+                text(label).size(11).font(crate::ui::MEDIUM).color(theme::TEXT_2),
                 Space::new().width(Length::Fill),
-                text(value).size(10).font(if val >= 85 { crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Semibold) } else { crate::fonts::MONO }).color(if val >= 85 { theme::WARN } else { theme::SLATE_300 }),
+                text(value).size(11).font(if val >= 85 { crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Semibold) } else { crate::fonts::MONO }).color(if val >= 85 { theme::WARN } else { theme::TEXT }),
             ],
             container(
                 row![
@@ -308,7 +292,7 @@ fn resource_card(app: &CoShell) -> Option<El<'_>> {
             .width(Length::Fill)
             .clip(true)
             .style(|_| container::Style {
-                background: Some(Background::Color(theme::BG_0)),
+                background: Some(Background::Color(alpha(Color::WHITE, 0.09))),
                 border: Border { radius: 3.0.into(), ..Default::default() },
                 ..Default::default()
             }),
@@ -320,22 +304,30 @@ fn resource_card(app: &CoShell) -> Option<El<'_>> {
     let mount = st.map(|s| s.disk_mount.clone()).filter(|m| !m.is_empty()).unwrap_or_else(|| "/".into());
     let col = column![
         row![
-            container(mono(tf("{0} 리소스", &[&t.display_name()]), 11.0, theme::SLATE_300)).width(Length::Fill).clip(true),
-            mono(if live { "LIVE" } else { "OFF" }, 10.0, if live { theme::ACCENT_TX } else { theme::TEXT_3 }),
+            dot(if live { theme::OK } else { theme::TEXT_3 }, 8.0),
+            container(text(t.display_name().to_string()).size(12).font(crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Semibold)).color(theme::TEXT).wrapping(text::Wrapping::None))
+                .width(Length::Fill)
+                .clip(true),
+            container(text(if live { "LIVE" } else { "OFF" }).size(10).font(crate::ui::MEDIUM).color(theme::TEXT_3)).padding([1, 6]).style(|_| container::Style {
+                background: Some(Background::Color(theme::CHIP)),
+                border: Border { radius: 6.0.into(), ..Default::default() },
+                ..Default::default()
+            }),
         ]
+        .spacing(6)
         .align_y(Alignment::Center),
         bar("CPU".into(), st.map(|s| s.cpu)),
         bar("MEM".into(), st.map(|s| s.mem)),
         bar(format!("DISK {mount}"), st.map(|s| s.disk)),
     ]
-    .spacing(8);
+    .spacing(10);
     Some(
         container(col)
-            .padding(12)
+            .padding(14)
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(Background::Color(alpha(theme::BG_2, 0.6))),
-                border: Border { color: theme::LINE, width: 1.0, radius: R_CARD.into() },
+                background: Some(Background::Color(alpha(theme::BG_2, 0.65))),
+                border: Border { color: theme::LINE, width: 1.0, radius: 16.0.into() },
                 ..Default::default()
             })
             .into(),
@@ -345,14 +337,14 @@ fn resource_card(app: &CoShell) -> Option<El<'_>> {
 fn footer(app: &CoShell) -> El<'_> {
     container(
         row![
-            text(tf("{0}대 호스트 등록됨", &[&app.hosts.len()])).size(11).color(theme::TEXT_2),
+            text(tf("{0}대 호스트 등록됨", &[&app.hosts.len()])).size(11).color(theme::TEXT_3),
             Space::new().width(Length::Fill),
             button(kbd(format!("v{}", crate::VERSION))).padding(0).style(btn_style(Btn::Ghost)).on_press(Message::About),
         ]
         .align_y(Alignment::Center),
     )
     .padding([0, 14])
-    .height(40)
-    .center_y(40)
+    .height(36)
+    .center_y(36)
     .into()
 }
