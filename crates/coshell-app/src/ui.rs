@@ -1,55 +1,42 @@
-//! Views: tab bar, terminal / connect / failure bodies, status bar,
+//! Views: header, tab bar, terminal / connect / failure bodies, status bar,
 //! ⌘K palette, host-key and interactive-auth dialogs.
+//!
+//! Layout follows coshell_ai_native_ssh_terminal.html: header on top, server
+//! sidebar · terminal workspace · AI chat in three columns, status bar below.
 
 use crate::i18n::{tf, tr};
 use coshell_ssh::{HostKeyDecision, HostKeyKind, HostKeyQuery, InteractiveQuery};
 use iced::widget::{Space, button, center, column, container, mouse_area, opaque, row, scrollable, stack, text, text_input, tooltip};
-use iced::{Alignment, Background, Border, Color, Element, Font, Length, Padding, Theme, border};
+use iced::{Alignment, Background, Border, Color, Element, Font, Length, Padding, Theme};
 use zeroize::Zeroizing;
 
 use crate::app::{CONFIRM_INPUT, CoShell, PALETTE_INPUT, Pending, Phase, RENAME_INPUT, SEARCH_INPUT, Search, Step, Tab, prompt_input_id};
 use crate::app::{Message, PaletteItem};
+use crate::icons::{DOWNLOAD, LOCK, LOCK_OPEN, SEARCH, SPARKLES, TRASH, X};
 use crate::terminal::TerminalView;
 use crate::hosts::Env;
 use crate::theme::{self, alpha};
-use crate::ui_hosts::{env_color, env_tag};
+use crate::ui_hosts::env_color;
 
-/// macOS title-bar row (traffic lights). Taller than the native 28px to leave a gap above the tabs.
-const TITLE_ROW_H: f32 = 36.0;
-/// Search box size; centred on the traffic lights (measured centre ≈ 16pt from the top).
-const SEARCH_W: f32 = 300.0;
-const SEARCH_H: f32 = 24.0;
-const SEARCH_TOP: f32 = 11.0;
-/// Tab strip below it: rounded tabs sharing the width.
-const TAB_ROW_H: f32 = 34.0;
-const TAB_ROW_BOTTOM: f32 = 4.0;
-const TAB_H: f32 = 26.0;
-const TAB_RADIUS: f32 = R_CONTROL;
-/// Tabs share the row up to this width each, so the + button follows the last tab.
-const TAB_MAX_W: f32 = 220.0;
-const TAB_MIN_W: f32 = 80.0;
-const TAB_GAP: f32 = 4.0;
-/// Settings button and gaps beside the search box when everything is on one row.
-const ONE_ROW_EXTRA_W: f32 = 120.0;
-/// Panel-toggle icon: a window outline split by a line; the right pane is filled while the panel is open.
-const SIDEBAR_ICON: (f32, f32) = (17.0, 15.0);
-const SIDEBAR_PANE_W: f32 = 6.5;
-const SIDEBAR_LINE_W: f32 = 1.5;
-const STATUSBAR_H: f32 = 24.0;
-/// macOS draws the traffic lights in our title row (unified title bar).
-const UNIFIED_TITLE: bool = cfg!(target_os = "macos");
+/// Top bar: brand, session pill, safety lock, AI toggle.
+const HEADER_H: f32 = 44.0;
+const PILL_MAX_W: f32 = 320.0;
+/// Session tab strip above the terminal.
+pub(crate) const BAR_H: f32 = 44.0;
+const TAB_MAX_W: f32 = 240.0;
+const TAB_RENAME_W: f32 = 140.0;
+const STATUSBAR_H: f32 = 32.0;
 const MODAL_W: f32 = 520.0;
-const PALETTE_W: f32 = 620.0;
-const PALETTE_LIST_H: f32 = 360.0;
+const PALETTE_W: f32 = 512.0;
+const PALETTE_LIST_H: f32 = 288.0;
 const SEARCH_BAR_INPUT_W: f32 = 240.0;
 const SEARCH_BAR_TOP: f32 = 8.0;
 const EXITED_BANNER_BOTTOM: f32 = 18.0;
-const TAB_RENAME_W: f32 = 140.0;
-/// Draggable strip between the terminal and the AI panel.
-const AI_DIVIDER_W: f32 = 5.0;
+/// Draggable strip between panes.
+const DIVIDER_W: f32 = 4.0;
 const TOAST_MAX_W: f32 = 560.0;
 /// Above the status bar and the "session ended" banner.
-const TOAST_BOTTOM: f32 = 92.0;
+const TOAST_BOTTOM: f32 = 44.0;
 
 pub(crate) type El<'a> = Element<'a, Message>;
 
@@ -57,6 +44,10 @@ pub(crate) type El<'a> = Element<'a, Message>;
 pub(crate) const R_CONTROL: f32 = 8.0;
 pub(crate) const R_CARD: f32 = 12.0;
 pub(crate) const R_DIALOG: f32 = 16.0;
+pub(crate) const R_PILL: f32 = 999.0;
+
+pub(crate) const MEDIUM: Font = Font { weight: iced::font::Weight::Medium, ..crate::fonts::SANS };
+pub(crate) const SEMIBOLD: Font = Font { weight: iced::font::Weight::Semibold, ..crate::fonts::SANS };
 
 // ------------------------------------------------------------------ styles
 
@@ -72,16 +63,34 @@ pub(crate) fn btn_style(kind: Btn) -> impl Fn(&Theme, button::Status) -> button:
     move |_, status| {
         let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
         let (bg, fg, line) = match kind {
-            Btn::Primary => (theme::ACCENT, theme::ON_ACCENT, Color::TRANSPARENT),
+            Btn::Primary => (if hover { theme::ACCENT_TX } else { theme::ACCENT }, theme::ON_ACCENT, Color::TRANSPARENT),
             Btn::Danger => (theme::ERR, Color::WHITE, Color::TRANSPARENT),
-            Btn::Plain => (if hover { theme::BG_4 } else { theme::BG_3 }, theme::TEXT, Color::TRANSPARENT),
-            Btn::Ghost => (if hover { theme::BG_3 } else { Color::TRANSPARENT }, theme::TEXT_2, Color::TRANSPARENT),
+            Btn::Plain => (if hover { theme::BG_3 } else { theme::BG_2 }, theme::TEXT, if hover { theme::LINE_2 } else { theme::LINE }),
+            Btn::Ghost => (if hover { theme::BG_3 } else { Color::TRANSPARENT }, if hover { theme::TEXT } else { theme::TEXT_2 }, Color::TRANSPARENT),
         };
         let disabled = matches!(status, button::Status::Disabled);
         button::Style {
-            background: Some(Background::Color(if disabled { alpha(bg, 0.4) } else { bg })),
+            background: Some(Background::Color(if disabled { alpha(bg, bg.a * 0.4) } else { bg })),
             text_color: if disabled { alpha(fg, 0.5) } else { fg },
             border: Border { color: line, width: 1.0, radius: R_CONTROL.into() },
+            ..Default::default()
+        }
+    }
+}
+
+/// Tinted pill / chip: `c` at low opacity with a matching border (the mockup's `bg-x/10 border-x/30`).
+pub(crate) fn tint_style(c: Color, on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let (bg, line, fg) = if on {
+            (alpha(c, if hover { 0.22 } else { 0.12 }), alpha(c, 0.32), c)
+        } else {
+            (if hover { theme::BG_3 } else { theme::BG_2 }, if hover { theme::LINE_2 } else { theme::LINE }, theme::TEXT_2)
+        };
+        button::Style {
+            background: Some(Background::Color(bg)),
+            text_color: fg,
+            border: Border { color: line, width: 1.0, radius: R_PILL.into() },
             ..Default::default()
         }
     }
@@ -96,7 +105,8 @@ const ICON_SIZE: f32 = 14.0;
 /// A button showing only an icon; `label` appears on hover.
 pub(crate) fn icon_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>, label: &'a str, kind: Btn, msg: Option<Message>) -> El<'a> {
     let color = match kind {
-        Btn::Primary | Btn::Danger => Color::WHITE,
+        Btn::Primary => theme::ON_ACCENT,
+        Btn::Danger => Color::WHITE,
         Btn::Plain => theme::TEXT,
         Btn::Ghost => theme::TEXT_2,
     };
@@ -106,9 +116,9 @@ pub(crate) fn icon_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>
 }
 
 /// Small label shown on hover.
-pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: &'a str, pos: tooltip::Position) -> El<'a> {
+pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: impl text::IntoFragment<'a>, pos: tooltip::Position) -> El<'a> {
     let bubble = container(text(label).size(11).color(theme::TEXT)).padding([4, 8]).style(|_| container::Style {
-        background: Some(Background::Color(theme::BG_3)),
+        background: Some(Background::Color(theme::BG_2)),
         border: Border { color: theme::LINE_2, width: 1.0, radius: R_CONTROL.into() },
         ..Default::default()
     });
@@ -136,9 +146,9 @@ pub(crate) fn pick_style(_: &Theme, status: iced::widget::pick_list::Status) -> 
     iced::widget::pick_list::Style {
         text_color: theme::TEXT,
         placeholder_color: theme::TEXT_3,
-        handle_color: theme::TEXT_3,
-        background: Background::Color(if hover { theme::BG_4 } else { theme::BG_3 }),
-        border: Border { color: Color::TRANSPARENT, width: 0.0, radius: R_CONTROL.into() },
+        handle_color: theme::TEXT_2,
+        background: Background::Color(if hover { theme::BG_3 } else { theme::BG_2 }),
+        border: Border { color: if hover { theme::LINE_2 } else { theme::LINE }, width: 1.0, radius: R_CONTROL.into() },
     }
 }
 
@@ -148,7 +158,7 @@ pub(crate) fn menu_style(_: &Theme) -> iced::overlay::menu::Style {
         border: Border { color: theme::LINE_2, width: 1.0, radius: R_CONTROL.into() },
         text_color: theme::TEXT_2,
         selected_text_color: theme::TEXT,
-        selected_background: Background::Color(theme::BG_4),
+        selected_background: Background::Color(theme::BG_3),
         shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.4), offset: iced::Vector::new(0.0, 8.0), blur_radius: 24.0 },
     }
 }
@@ -157,7 +167,7 @@ pub(crate) fn input_style(_: &Theme, status: text_input::Status) -> text_input::
     let focused = matches!(status, text_input::Status::Focused { .. });
     text_input::Style {
         background: Background::Color(theme::BG_0),
-        border: Border { color: if focused { alpha(theme::ACCENT, 0.7) } else { theme::LINE_2 }, width: 1.0, radius: R_CONTROL.into() },
+        border: Border { color: if focused { alpha(theme::ACCENT, 0.6) } else { theme::LINE }, width: 1.0, radius: R_CONTROL.into() },
         icon: theme::TEXT_3,
         placeholder: theme::TEXT_3,
         value: theme::TEXT,
@@ -165,16 +175,50 @@ pub(crate) fn input_style(_: &Theme, status: text_input::Status) -> text_input::
     }
 }
 
-fn bar_style(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(theme::BG_1)),
-        text_color: Some(theme::TEXT_2),
-        ..Default::default()
+/// Text field without a box (the palette's and the terminal search's).
+pub(crate) fn bare_input_style(_: &Theme, _: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        icon: theme::TEXT_3,
+        placeholder: theme::TEXT_3,
+        value: theme::TEXT,
+        selection: alpha(theme::ACCENT, 0.35),
     }
 }
 
+pub(crate) fn fill(c: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style { background: Some(Background::Color(c)), ..Default::default() }
+}
+
+/// 1px rule across (`true`) or down.
+pub(crate) fn rule<'a>(across: bool) -> El<'a> {
+    let c = container(Space::new()).style(fill(theme::LINE));
+    if across { c.height(1).width(Length::Fill).into() } else { c.width(1).height(Length::Fill).into() }
+}
+
+/// Round status light.
+pub(crate) fn dot<'a>(c: Color, size: f32) -> El<'a> {
+    container(Space::new()).width(size).height(size).style(move |_| container::Style {
+        background: Some(Background::Color(c)),
+        border: Border { radius: (size / 2.0).into(), ..Default::default() },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Keyboard hint (`⌘K`, `Return ↵`).
+pub(crate) fn kbd<'a>(s: impl Into<String>) -> El<'a> {
+    container(mono(s, 10.0, theme::TEXT_2)).padding([1, 5]).style(|_| container::Style {
+        background: Some(Background::Color(theme::BG_0)),
+        border: Border { color: theme::LINE, width: 1.0, radius: 4.0.into() },
+        ..Default::default()
+    })
+    .into()
+}
+
 pub(crate) fn mono<'a>(s: impl Into<String>, size: f32, color: Color) -> El<'a> {
-    text(s.into()).size(size).font(Font::MONOSPACE).color(color).into()
+    text(s.into()).size(size).font(crate::fonts::MONO).color(color).into()
 }
 
 pub(crate) fn muted<'a>(s: impl Into<String>) -> El<'a> {
@@ -183,24 +227,29 @@ pub(crate) fn muted<'a>(s: impl Into<String>) -> El<'a> {
 
 // ------------------------------------------------------------------ root
 
+/// Draggable divider between panes: a 1px border on the terminal's side of a wider grab strip.
+fn divider<'a>(on_press: Message, line_right: bool) -> El<'a> {
+    let strip = container(Space::new()).width(DIVIDER_W - 1.0).height(Length::Fill).style(fill(theme::BG_1));
+    let content: El<'a> = if line_right { row![strip, rule(false)].into() } else { row![rule(false), strip].into() };
+    mouse_area(content).on_press(on_press).interaction(iced::mouse::Interaction::ResizingHorizontally).into()
+}
+
 pub fn view(app: &CoShell) -> El<'_> {
-    let center: El<'_> = if app.ai.open {
-        let line = container(Space::new()).width(1).height(Length::Fill).style(|_| container::Style {
-            background: Some(Background::Color(theme::LINE)),
-            ..Default::default()
-        });
-        // Wider than the line so it is easy to grab; filled so the window background never shows through.
-        let divider = mouse_area(container(line).center_x(AI_DIVIDER_W).height(Length::Fill).style(|_| container::Style {
-            background: Some(Background::Color(theme::BG_1)),
-            ..Default::default()
-        }))
-        .on_press(Message::AiResizeStart)
-        .interaction(iced::mouse::Interaction::ResizingHorizontally);
-        row![body(app), divider, crate::ui_ai::panel(app)].height(Length::Fill).into()
-    } else {
-        body(app)
-    };
-    let main: El<'_> = column![tab_bar(app), center, status_bar(app)].into();
+    let mut cols: Vec<El<'_>> = Vec::new();
+    if app.settings.sidebar_open {
+        cols.push(crate::ui_sidebar::sidebar(app));
+        cols.push(divider(Message::SidebarResizeStart, true));
+    }
+    cols.push(column![tab_bar(app), body(app)].width(Length::Fill).into());
+    if app.ai.open {
+        cols.push(divider(Message::AiResizeStart, false));
+        cols.push(crate::ui_ai::panel(app));
+    }
+    let mut main = column![header(app), row(cols).height(Length::Fill)];
+    if app.settings.statusbar_open {
+        main = main.push(status_bar(app));
+    }
+    let main: El<'_> = main.into();
     let mut layers = vec![main];
     if let Some(n) = &app.notice {
         layers.push(toast(n));
@@ -248,18 +297,16 @@ pub fn view(app: &CoShell) -> El<'_> {
 
 /// Dismissible notice above the status bar (also goes away by itself).
 fn toast(message: &str) -> El<'_> {
-    let card = container(
-        row![
-            text("●").size(9).color(theme::WARN),
-            text(message).size(12).width(Length::Shrink),
-            button(text("×").size(13).color(theme::TEXT_3)).padding([0, 6]).style(btn_style(Btn::Ghost)).on_press(Message::NoticeDismiss),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding([8, 12])
-    .max_width(TOAST_MAX_W)
-    .style(card_style(alpha(theme::WARN, 0.45)));
+    let card = container(row![dot(theme::ACCENT_TX, 6.0), text(message).size(12).color(theme::SLATE_100)].spacing(8).align_y(Alignment::Center))
+        .padding([8, 14])
+        .max_width(TOAST_MAX_W)
+        .style(|_| container::Style {
+            background: Some(Background::Color(theme::BG_2)),
+            border: Border { color: theme::LINE_2, width: 1.0, radius: R_CARD.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.45), offset: iced::Vector::new(0.0, 10.0), blur_radius: 30.0 },
+            ..Default::default()
+        });
+    let card = mouse_area(card).on_press(Message::NoticeDismiss);
     container(opaque(card)).center_x(Length::Fill).align_bottom(Length::Fill).padding(Padding::ZERO.bottom(TOAST_BOTTOM)).into()
 }
 
@@ -272,7 +319,7 @@ pub(crate) fn modal(content: El<'_>) -> El<'_> {
 
 // ------------------------------------------------------------------ chrome
 
-fn status_dot(tab: &Tab) -> Color {
+pub(crate) fn status_dot(tab: &Tab) -> Color {
     match (&tab.phase, tab.exited) {
         (Phase::Connecting, _) => theme::WARN,
         (Phase::Failed(_), _) | (Phase::Live(_), true) => theme::ERR,
@@ -281,210 +328,357 @@ fn status_dot(tab: &Tab) -> Color {
     }
 }
 
-fn tab_row(content: El<'_>) -> container::Container<'_, Message> {
-    container(content)
-        .padding(Padding { top: 0.0, right: 8.0, bottom: TAB_ROW_BOTTOM, left: 8.0 })
-        .height(TAB_ROW_H)
-        .width(Length::Fill)
-        .align_y(Alignment::Center)
+/// Top bar: sidebar toggle and brand · session pill and safety lock · AI toggle and settings.
+/// What the session pill names: the server's group, else its name ("Cluster: ap-northeast-2").
+fn cluster_of(app: &CoShell, t: &Tab) -> String {
+    if t.is_local() {
+        return "local".into();
+    }
+    t.alias
+        .as_deref()
+        .and_then(|a| app.host_store.get(a))
+        .and_then(|d| d.group.clone())
+        .unwrap_or_else(|| t.display_name().to_string())
 }
 
-/// Tabs share the row equally, title centred, like the macOS Terminal tab bar.
-fn tab_bar(app: &CoShell) -> El<'_> {
-    let tab_w = tab_width(app);
-    let tabs = app.tabs.iter().map(|t| {
-        let active = Some(t.id) == app.active;
-        let attention = t.prompt.is_some() && !active;
-        let title: El<'_> = match &app.rename {
-            Some((id, name)) if *id == t.id => text_input(tr("탭 이름"), name)
-                .id(RENAME_INPUT)
-                .on_input(Message::TabRename)
-                .on_submit(Message::TabRenameCommit)
-                .size(12)
-                .padding([1, 5])
-                .width(TAB_RENAME_W)
-                .style(input_style)
-                .into(),
-            _ => text(t.display_name().to_string())
-                .size(12)
-                .wrapping(text::Wrapping::None)
-                .font(if active { Font { weight: iced::font::Weight::Semibold, ..Font::DEFAULT } } else { Font::DEFAULT })
-                .color(if active { theme::TEXT } else { theme::TEXT_3 })
-                .into(),
-        };
-        let label = row![
-            text("●").size(8).color(status_dot(t)),
-            title,
-            if attention { text("!").size(11).color(theme::WARN) } else { text("") },
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
-        let close = button(text("×").size(13).color(theme::TEXT_3)).padding([0, 5]).style(btn_style(Btn::Ghost)).on_press(Message::Close(t.id));
-        let bar_color = env_color(t.env).map(|c| if active { c } else { alpha(c, 0.55) });
-        let content = stack![
-            container(label).center(Length::Fill).padding([0, 24]).clip(true),
-            container(close).align_left(Length::Fill).center_y(Length::Fill).padding(Padding::ZERO.left(4.0)),
-            container(container(Space::new()).height(2).width(Length::Fill).style(move |_| container::Style {
-                background: bar_color.map(Background::Color),
-                border: Border { radius: 1.0.into(), ..Default::default() },
+/// The layout buttons' pictures: a window outline with the panel's part filled while it shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutIcon {
+    Left,
+    Right,
+}
+
+const LAYOUT_ICON: (f32, f32) = (17.0, 15.0);
+const LAYOUT_LINE: f32 = 1.5;
+/// Gap between the outline and the filled panel part.
+const LAYOUT_GAP: f32 = 1.5;
+/// Width (or height) of the filled panel part.
+const LAYOUT_PANE: f32 = 4.0;
+
+fn layout_icon<'a>(kind: LayoutIcon, on: bool, color: Color) -> El<'a> {
+    let (w, h) = LAYOUT_ICON;
+    let pane = |w: Length, h: Length, filled: bool, radius: iced::border::Radius| {
+        container(Space::new()).width(w).height(h).style(move |_| container::Style {
+            background: filled.then_some(Background::Color(color)),
+            border: Border { radius, ..Default::default() },
+            ..Default::default()
+        })
+    };
+    let r = |tl: f32, tr: f32, br: f32, bl: f32| iced::border::Radius { top_left: tl, top_right: tr, bottom_right: br, bottom_left: bl };
+    let outline = |content: El<'a>, w: f32, h: f32| -> El<'a> {
+        container(content)
+            .width(w)
+            .height(h)
+            .padding(LAYOUT_LINE + LAYOUT_GAP)
+            .style(move |_| container::Style {
+                border: Border { color, width: LAYOUT_LINE, radius: 3.5.into() },
                 ..Default::default()
-            }))
-            .align_bottom(Length::Fill)
-            .padding([0, 12]),
-        ];
-        button(content)
-            .padding(0)
-            .width(tab_w)
-            .height(TAB_H)
-            .on_press(Message::Activate(t.id))
-            .style(move |_, status| {
-                let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(Background::Color(if active {
-                        theme::BG_3
-                    } else if hover {
-                        theme::BG_2
-                    } else {
-                        alpha(theme::BG_2, 0.55)
-                    })),
-                    text_color: theme::TEXT,
-                    border: Border { color: if active { theme::LINE_2 } else { theme::LINE }, width: 1.0, radius: TAB_RADIUS.into() },
-                    ..Default::default()
-                }
             })
             .into()
-    });
-    let new_tab = button(container(text("+").size(15).color(theme::TEXT_2)).center(Length::Fill))
-        .width(TAB_H)
-        .height(TAB_H)
-        .padding(0)
-        .on_press(Message::OpenPalette)
-        .style(|_, status| button::Style {
-            background: Some(Background::Color(if matches!(status, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
-            text_color: theme::TEXT,
-            border: Border { color: theme::LINE_2, width: 1.0, radius: (TAB_H / 2.0).into() },
+    };
+    if !on {
+        // Closed: just the divider where the panel would be.
+        let divider = container(Space::new()).width(LAYOUT_LINE).height(Length::Fill).style(move |_| container::Style {
+            background: Some(Background::Color(color)),
             ..Default::default()
         });
-    let r = row(tabs.collect::<Vec<El<'_>>>())
-        .push(new_tab)
-        .push(Space::new().width(Length::Fill))
-        .spacing(TAB_GAP)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-    let on = app.settings_draft.is_some();
-    let settings = button(
-        row![text(tr("설정")).size(12.5).color(if on { theme::TEXT } else { theme::TEXT_2 }), mono("⌘,", 10.5, theme::TEXT_3)]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .height(Length::Fill),
-    )
-    .height(SEARCH_H)
-    .padding([0, 10])
-    .on_press(Message::SettingsOpen)
-    .style(move |_, status| button::Style {
-        background: Some(Background::Color(if on || matches!(status, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
-        text_color: theme::TEXT,
-        border: Border { color: if on { alpha(theme::ACCENT, 0.6) } else { theme::LINE }, width: 1.0, radius: R_CONTROL.into() },
+        let edge = Space::new().width(LAYOUT_GAP + LAYOUT_PANE + LAYOUT_GAP / 2.0);
+        let content: El<'a> = match kind {
+            LayoutIcon::Left => row![edge, divider].into(),
+            LayoutIcon::Right => row![Space::new().width(Length::Fill), divider, edge].into(),
+        };
+        return container(content)
+            .width(w)
+            .height(h)
+            .padding(LAYOUT_LINE)
+            .style(move |_| container::Style {
+                border: Border { color, width: LAYOUT_LINE, radius: 3.5.into() },
+                ..Default::default()
+            })
+            .into();
+    }
+    match kind {
+        LayoutIcon::Left => outline(row![pane(LAYOUT_PANE.into(), Length::Fill, on, r(1.0, 0.0, 0.0, 1.0))].into(), w, h),
+        LayoutIcon::Right => outline(row![Space::new().width(Length::Fill), pane(LAYOUT_PANE.into(), Length::Fill, on, r(0.0, 1.0, 1.0, 0.0))].into(), w, h),
+    }
+}
+
+fn layout_btn<'a>(kind: LayoutIcon, on: bool, label: &'a str, msg: Message) -> El<'a> {
+    let b = button(container(layout_icon(kind, on, theme::SLATE_300)).center(28)).padding(0).on_press(msg).style(|_, st| button::Style {
+        background: matches!(st, button::Status::Hovered | button::Status::Pressed).then_some(Background::Color(theme::BG_3)),
+        border: Border { radius: 6.0.into(), ..Default::default() },
         ..Default::default()
     });
-    let search = button(
-        row![text(tr("서버 검색")).size(12.5).color(theme::TEXT_3), Space::new().width(Length::Fill), mono("⌘K", 10.5, theme::TEXT_2)]
-            .align_y(Alignment::Center)
-            .height(Length::Fill),
-    )
-    .width(SEARCH_W)
-    .height(SEARCH_H)
-    .padding([0, 10])
-    .on_press(Message::OpenPalette)
-    .style(|_, _| button::Style {
-        background: Some(Background::Color(theme::BG_2)),
-        text_color: theme::TEXT_3,
-        border: Border { color: theme::LINE, width: 1.0, radius: R_CONTROL.into() },
-        ..Default::default()
-    });
-    let bar: El<'_> = if UNIFIED_TITLE {
-        // Row 1: traffic lights (drawn by macOS) + search. Row 2: compact tabs.
-        let title = container(row![Space::new().width(Length::Fill), settings, search, sidebar_toggle(app.ai.open)].spacing(8).align_y(Alignment::Center))
-            .padding(Padding { top: SEARCH_TOP, right: 8.0, bottom: 0.0, left: 0.0 })
-            .height(TITLE_ROW_H)
-            .width(Length::Fill)
-            .align_y(Alignment::Start);
-        container(column![title, tab_row(r.into())]).width(Length::Fill).style(bar_style).into()
-    } else {
-        container(tab_row(row![r, settings, search, sidebar_toggle(app.ai.open)].spacing(8).align_y(Alignment::Center).into()))
-            .width(Length::Fill)
-            .style(bar_style)
-            .into()
+    tip(b, label, tooltip::Position::Bottom)
+}
+
+/// Room left of the brand for macOS's window buttons, which sit in the header.
+const TRAFFIC_LIGHTS_W: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
+
+/// Top bar: session pill and safety lock · layout buttons.
+fn header(app: &CoShell) -> El<'_> {
+    let (pill_dot, value) = match app.active_tab() {
+        Some(t) => (if matches!(t.phase, Phase::Live(_)) && !t.exited { theme::ACCENT_TX } else { status_dot(t) }, cluster_of(app, t)),
+        None => (theme::TEXT_3, "—".into()),
     };
-    // Tabs and buttons capture their clicks; only empty space reaches this.
+    let session = button(
+        row![
+            dot(pill_dot, 8.0),
+            container(
+                row![mono("Cluster: ", 12.0, theme::SLATE_300), mono(value, 12.0, theme::SLATE_100)].align_y(Alignment::Center)
+            )
+            .clip(true)
+            .max_width(PILL_MAX_W),
+            container(mono("⌘K", 10.0, theme::TEXT_2)).padding([1, 6]).style(|_| container::Style {
+                background: Some(Background::Color(theme::BG_0)),
+                border: Border { color: theme::LINE, width: 1.0, radius: 4.0.into() },
+                ..Default::default()
+            }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding { top: 4.0, right: 6.0, bottom: 4.0, left: 12.0 })
+    .on_press(Message::OpenPalette)
+    .style(|_, st| {
+        let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(if hover { theme::BG_3 } else { alpha(theme::BG_2, 0.9) })),
+            text_color: theme::SLATE_300,
+            border: Border { color: if hover { theme::LINE_2 } else { theme::LINE }, width: 1.0, radius: R_PILL.into() },
+            ..Default::default()
+        }
+    });
+    let guard_on = app.prod_guard;
+    let guard = button(
+        row![
+            crate::icons::tinted(if guard_on { &LOCK } else { &LOCK_OPEN }, 14.0, if guard_on { theme::AMBER_300 } else { theme::TEXT_2 }),
+            text(if guard_on { tr("운영 안전 잠금 ON") } else { tr("운영 안전 잠금 OFF") }).size(11).font(MEDIUM),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([4, 10])
+    .on_press(Message::ProdGuard)
+    .style(move |_, st| {
+        let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
+        let (bg, line, fg) = if guard_on {
+            (alpha(theme::WARN_500, if hover { 0.2 } else { 0.1 }), alpha(theme::WARN_500, 0.3), theme::AMBER_300)
+        } else {
+            (if hover { theme::BG_3 } else { theme::BG_2 }, theme::LINE, theme::TEXT_2)
+        };
+        button::Style {
+            background: Some(Background::Color(bg)),
+            text_color: fg,
+            border: Border { color: line, width: 1.0, radius: R_PILL.into() },
+            ..Default::default()
+        }
+    });
+    let mut center = row![tip(session, tr("서버 전환 · 접속 (⌘K)"), tooltip::Position::Bottom)].spacing(8).align_y(Alignment::Center);
+    // The lock only applies to production sessions, so it only shows on one.
+    if app.active_tab().is_some_and(|t| t.env == Env::Prod) {
+        center = center.push(tip(guard, tr("운영 서버 위험 명령어 실행 보호 모드"), tooltip::Position::Bottom));
+    }
+
+    // The AI panel has no other way back in from the header once closed.
+    let (side, ai) = (app.settings.sidebar_open, app.ai.open);
+    let right = row![
+        layout_btn(LayoutIcon::Left, side, if side { tr("서버 사이드바 숨기기 (⌘B)") } else { tr("서버 사이드바 보기 (⌘B)") }, Message::SidebarToggle),
+        layout_btn(LayoutIcon::Right, ai, if ai { tr("AI 패널 닫기 (⌘L)") } else { tr("AI 패널 열기 (⌘L)") }, Message::AiToggle),
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center);
+
+    let bar = stack![
+        container(row![Space::new().width(Length::Fill), right].align_y(Alignment::Center))
+            .padding(Padding { top: 0.0, right: 16.0, bottom: 0.0, left: 16.0 + TRAFFIC_LIGHTS_W })
+            .width(Length::Fill)
+            .height(HEADER_H - 1.0)
+            .center_y(HEADER_H - 1.0),
+        container(center).center(Length::Fill),
+    ];
+    let bar = container(column![bar, rule(true)]).width(Length::Fill).style(fill(theme::BG_1));
+    // Buttons capture their clicks; only empty space reaches this.
     mouse_area(bar).on_press(Message::WindowDrag).on_double_click(Message::WindowZoom).into()
 }
 
-/// Equal share of the row, at most `TAB_MAX_W` so a few tabs do not stretch across the window.
-fn tab_width(app: &CoShell) -> f32 {
-    let n = app.tabs.len().max(1) as f32;
-    let mut row = app.settings.window.width - 16.0 - TAB_H - TAB_GAP * n;
-    if !UNIFIED_TITLE {
-        row -= SEARCH_W + ONE_ROW_EXTRA_W + TAB_H;
+/// Env shown before an active tab's name ("운영 · app-01").
+fn tab_group(t: &Tab) -> Option<&'static str> {
+    match t.env {
+        Env::None if t.is_local() => Some(tr("로컬")),
+        Env::None => None,
+        e => Some(e.label()),
     }
-    (row / n).clamp(TAB_MIN_W, TAB_MAX_W)
 }
 
-/// Opens and closes the AI panel.
-fn sidebar_toggle<'a>(open: bool) -> El<'a> {
-    let (w, h) = SIDEBAR_ICON;
-    let fill = |on: bool| {
-        move |_: &Theme| container::Style { background: on.then_some(Background::Color(theme::TEXT_2)), ..Default::default() }
+/// Dot and top edge colour of a tab: production amber, everything else emerald (red once it is down).
+fn tab_color(t: &Tab) -> Color {
+    match (&t.phase, t.exited) {
+        (Phase::Failed(_), _) | (Phase::Live(_), true) => theme::ERR_TX,
+        _ if t.env == Env::Prod => theme::WARN,
+        _ => theme::ACCENT_TX,
+    }
+}
+
+/// One session tab: coloured top edge when active, `env · name`, close.
+fn tab_item<'a>(app: &'a CoShell, t: &'a Tab) -> El<'a> {
+    let active = Some(t.id) == app.active && !app.host_view;
+    let attention = t.prompt.is_some() && !active;
+    let title: El<'a> = match &app.rename {
+        Some((id, name)) if *id == t.id => text_input(tr("탭 이름"), name)
+            .id(RENAME_INPUT)
+            .on_input(Message::TabRename)
+            .on_submit(Message::TabRenameCommit)
+            .size(12)
+            .padding([1, 5])
+            .width(TAB_RENAME_W)
+            .style(input_style)
+            .into(),
+        _ => {
+            let mut r = row![].align_y(Alignment::Center);
+            if active && let Some(g) = tab_group(t) {
+                r = r.push(text(g).size(12).font(MEDIUM).color(theme::TEXT_2).wrapping(text::Wrapping::None));
+                r = r.push(text(" · ").size(12).font(MEDIUM).color(theme::TEXT_2).wrapping(text::Wrapping::None));
+            }
+            r.push(
+                text(t.display_name().to_string())
+                    .size(12)
+                    .font(crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Medium))
+                    .color(if active { theme::SLATE_100 } else { theme::TEXT_2 })
+                    .wrapping(text::Wrapping::None),
+            )
+            .into()
+        }
     };
-    let line = container(Space::new()).width(SIDEBAR_LINE_W).height(Length::Fill).style(fill(true));
-    let pane = container(Space::new()).width(SIDEBAR_PANE_W).height(Length::Fill).style(move |_| container::Style {
-        background: open.then_some(Background::Color(theme::TEXT_2)),
-        border: Border { radius: border::Radius { top_right: 2.0, bottom_right: 2.0, ..Default::default() }, ..Default::default() },
-        ..Default::default()
+    let c = tab_color(t);
+    let mut label = row![dot(if active { c } else { alpha(c, 0.6) }, 8.0), container(title).clip(true)].spacing(8).align_y(Alignment::Center);
+    if attention {
+        label = label.push(text("!").size(11).color(theme::WARN));
+    }
+    if app.tabs.len() > 1 {
+        label = label.push(tip(
+            button(crate::icons::tinted(&X, 12.0, theme::TEXT_3)).padding(2).style(btn_style(Btn::Ghost)).on_press(Message::Close(t.id)),
+            tr("탭 닫기"),
+            tooltip::Position::Bottom,
+        ));
+    }
+    let edge = if active { c } else { Color::TRANSPARENT };
+    let content = column![
+        container(Space::new()).height(2).width(Length::Fill).style(fill(edge)),
+        container(label).padding(Padding { top: 0.0, right: 10.0, bottom: 2.0, left: 14.0 }).height(Length::Fill).center_y(Length::Fill),
+    ];
+    let tab = button(content).padding(0).height(BAR_H - 1.0).on_press(Message::Activate(t.id)).style(move |_, status| {
+        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(if active {
+                theme::BG_0
+            } else if hover {
+                alpha(theme::BG_3, 0.5)
+            } else {
+                Color::TRANSPARENT
+            })),
+            text_color: theme::TEXT,
+            ..Default::default()
+        }
     });
-    // Inset by the outline width so the pane keeps the rounded corners.
-    let icon = container(row![Space::new().width(Length::Fill), line, pane]).width(w).height(h).padding(SIDEBAR_LINE_W).style(|_| container::Style {
-        border: Border { color: theme::TEXT_2, width: 1.5, radius: 3.5.into() },
-        ..Default::default()
+    row![container(tab).max_width(TAB_MAX_W), rule(false)].height(BAR_H - 1.0).into()
+}
+
+/// Session tabs on the left; AI check, find, export and clear on the right.
+fn tab_bar(app: &CoShell) -> El<'_> {
+    let mut tabs = row(app.tabs.iter().map(|t| tab_item(app, t)).collect::<Vec<_>>()).height(BAR_H - 1.0);
+    tabs = tabs.push(tip(
+        button(container(crate::icons::tinted(&crate::icons::PLUS, 16.0, theme::TEXT_2)).center_y(Length::Fill).padding([0, 12]))
+            .height(BAR_H - 1.0)
+            .padding(0)
+            .on_press(Message::OpenPalette)
+            .style(|_, st| button::Style {
+                background: matches!(st, button::Status::Hovered).then_some(Background::Color(alpha(theme::BG_3, 0.5))),
+                ..Default::default()
+            }),
+        tr("새 세션 열기"),
+        tooltip::Position::Bottom,
+    ));
+    let strip = scrollable(tabs)
+        .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::hidden()))
+        .width(Length::Fill)
+        .height(BAR_H - 1.0);
+
+    let live = app.live_tab().is_some() && !app.host_view;
+    let diagnose = button(
+        row![crate::icons::tinted(&SPARKLES, 12.0, theme::ACCENT_TX), text(tr("AI 진단")).size(11).font(MEDIUM)].spacing(6).align_y(Alignment::Center),
+    )
+    .padding([4, 10])
+    .on_press_maybe(app.active_tab().map(|_| Message::AiDiagnose))
+    .style(|_, st| {
+        let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(alpha(theme::ACCENT, if hover { 0.2 } else { 0.1 }))),
+            text_color: theme::ACCENT_TX,
+            border: Border { color: alpha(theme::ACCENT, 0.2), width: 1.0, radius: 6.0.into() },
+            ..Default::default()
+        }
     });
-    let b = button(container(icon).center(Length::Fill))
-        .width(SEARCH_H + 4.0)
-        .height(SEARCH_H)
-        .padding(0)
-        .on_press(Message::AiToggle)
-        .style(btn_style(if open { Btn::Plain } else { Btn::Ghost }));
-    tip(b, if open { tr("AI 패널 닫기 (⌘L)") } else { tr("AI 패널 열기 (⌘L)") }, tooltip::Position::Bottom)
+    let tool = |icon: &'static std::sync::LazyLock<iced::widget::svg::Handle>, label: &'static str, msg: Message| -> El<'static> {
+        let b = button(crate::icons::tinted(icon, 14.0, theme::TEXT_2)).padding(6).on_press_maybe(live.then_some(msg)).style(|_, st| button::Style {
+            background: matches!(st, button::Status::Hovered).then_some(Background::Color(theme::BG_3)),
+            border: Border { radius: 6.0.into(), ..Default::default() },
+            ..Default::default()
+        });
+        tip(b, label, tooltip::Position::Bottom)
+    };
+    let tools = row![
+        tip(diagnose, tr("현재 서버 AI 자동 진단"), tooltip::Position::Bottom),
+        tool(&SEARCH, tr("터미널 출력 검색 (⌘F)"), Message::Shortcut(crate::app::Shortcut::Find)),
+        tool(&DOWNLOAD, tr("세션 로그 내보내기 (.md)"), Message::ExportSession),
+        tool(&TRASH, tr("터미널 화면 지우기 (clear)"), Message::TermClear),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+    let mut bar = row![strip].height(BAR_H - 1.0).align_y(Alignment::Center);
+    if app.active_tab().is_some() && !app.host_view {
+        bar = bar
+            .push(container(Space::new()).width(1).height(24).style(fill(alpha(theme::LINE, 0.6))))
+            .push(container(tools).padding(Padding { top: 0.0, right: 8.0, bottom: 0.0, left: 8.0 }).center_y(BAR_H - 1.0));
+    }
+    container(column![bar, rule(true)]).width(Length::Fill).style(fill(theme::BG_1)).into()
+}
+
+/// `user@name (address)` of a session's target.
+fn target_line(t: &Tab) -> String {
+    let last = t.route.last().cloned().unwrap_or_default();
+    match last.split_once('@') {
+        Some((user, host)) => format!("{user}@{} ({})", t.name, host),
+        None if last.is_empty() => t.name.clone(),
+        None => format!("{} ({last})", t.name),
+    }
 }
 
 fn status_bar(app: &CoShell) -> El<'_> {
-    let small = |s: String, c: Color| text(s).size(11).color(c);
-    let mut items: Vec<El<'_>> = Vec::new();
+    let sep = || -> El<'_> { mono("|", 11.0, theme::LINE_2) };
+    let small = |s: String, c: Color| -> El<'_> { mono(s, 11.0, c) };
+    let mut left: Vec<El<'_>> = Vec::new();
+    let mut right: Vec<El<'_>> = Vec::new();
     match app.active_tab() {
         Some(t) => {
-            let state = match (&t.phase, t.exited) {
-                (Phase::Connecting, _) => tr("연결 중"),
-                (Phase::Failed(_), _) => tr("실패"),
-                (Phase::Live(_), true) => tr("종료됨"),
-                (Phase::Live(_), false) if t.is_local() => tr("로컬"),
-                (Phase::Live(_), false) => tr("연결됨"),
+            let (state, color) = match (&t.phase, t.exited) {
+                (Phase::Connecting, _) => (tr("연결 중"), theme::WARN),
+                (Phase::Failed(_), _) => (tr("연결 실패"), theme::ERR_TX),
+                (Phase::Live(_), true) => (tr("연결 종료됨"), theme::ERR_TX),
+                (Phase::Live(_), false) if t.is_local() => (tr("로컬 셸"), theme::ACCENT_TX),
+                (Phase::Live(_), false) => (tr("SSH 연결됨"), theme::ACCENT_TX),
             };
-            items.push(small("●".into(), status_dot(t)).into());
-            items.push(env_tag(t.env));
-            items.push(small(state.into(), theme::TEXT_2).into());
+            left.push(row![dot(color, 8.0), text(state).size(11).font(MEDIUM).color(color)].spacing(6).align_y(Alignment::Center).into());
+            left.push(sep());
             if t.is_local() {
-                items.push(mono(coshell_term::local_shell_name(), 11.0, theme::TEXT_3));
+                left.push(small(format!("{}@{} (localhost)", crate::login_user(), coshell_term::local_shell_name()), theme::SLATE_300));
             } else {
-                let total: std::time::Duration =
-                    t.steps.iter().filter_map(|s| if let Step::Done(d) = s { Some(*d) } else { None }).sum();
-                items.push(mono(t.route.last().cloned().unwrap_or_default(), 11.0, theme::TEXT_3));
-                if matches!(t.phase, Phase::Live(_)) {
-                    items.push(small(format!("{}ms", total.as_millis()), theme::TEXT_3).into());
-                }
-                // Jump hosts are a detail: a small hint, not part of the headline.
+                left.push(small(target_line(t), theme::SLATE_300));
+                // Jump hosts and tunnels are details: shown only when there are some.
                 if t.route.len() > 1 {
-                    items.push(small(tf("경유 {0}", &[&(t.route.len() - 1)]), theme::TEXT_3).into());
+                    left.push(small(tf("경유 {0}", &[&(t.route.len() - 1)]), theme::TEXT_3));
                 }
-                if t.conn.is_some() || !t.tunnels.is_empty() {
+                if !t.tunnels.is_empty() {
                     let (label, failed) = crate::ui_tunnel::summary(t);
                     let mut content = row![crate::icons::icon(&crate::icons::PORT_FORWARDING, 13.0), text(label).size(11).color(theme::TEXT_2)]
                         .spacing(5)
@@ -492,43 +686,54 @@ fn status_bar(app: &CoShell) -> El<'_> {
                     if failed > 0 {
                         content = content.push(text(tf("오류 {0}", &[&failed])).size(11).color(theme::ERR));
                     }
-                    items.push(button(content).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::TunnelPanel).into());
+                    left.push(button(content).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::TunnelPanel).into());
                 }
             }
+            if !t.is_local() {
+                let ms = t.stats.as_ref().and_then(|s| s.latency_ms).map(|ms| format!("{ms}ms")).unwrap_or_else(|| {
+                    let total: std::time::Duration = t.steps.iter().filter_map(|s| if let Step::Done(d) = s { Some(*d) } else { None }).sum();
+                    format!("{}ms", total.as_millis())
+                });
+                right.push(row![small(tr("지연시간: ").into(), theme::TEXT_2), small(ms, theme::ACCENT_TX)].into());
+                right.push(sep());
+            }
+            right.push(small("UTF-8".into(), theme::TEXT_2));
+            right.push(sep());
+            right.push(small("xterm-256color".into(), theme::TEXT_2));
+            if let Some(os) = t.stats.as_ref().and_then(|s| s.os.clone()) {
+                right.push(sep());
+                right.push(small(os, theme::SLATE_300));
+            }
         }
-        None => items.push(small(tr("세션 없음").into(), theme::TEXT_3).into()),
-    }
-    items.push(Space::new().width(Length::Fill).into());
-    if let Some(Tab { phase: Phase::Live(s), .. }) = app.active_tab() {
-        let size = s.size();
-        items.push(small(format!("{}×{}", size.cols, size.rows), theme::TEXT_3).into());
+        None => left.push(small(tr("세션 없음").into(), theme::TEXT_3)),
     }
     if let Some(u) = &app.update {
-        items.push(
-            button(text(tf("⬆ {0} 업데이트", &[&u.version])).size(11).color(theme::ACCENT))
+        right.push(sep());
+        right.push(
+            button(text(tf("⬆ {0} 업데이트", &[&u.version])).size(11).color(theme::ACCENT_TX))
                 .padding([1, 6])
                 .style(btn_style(Btn::Ghost))
                 .on_press(Message::UpdateAsk)
                 .into(),
         );
     }
-    items.push(small(tf("서버 {0}", &[&app.hosts.len()]), theme::TEXT_3).into());
-    items.push(
-        button(text(tr("설정")).size(11).color(theme::TEXT_3)).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::SettingsOpen).into(),
-    );
-    items.push(
-        button(text(format!("v{}", crate::VERSION)).size(11).color(theme::TEXT_3))
-            .padding([1, 6])
-            .style(btn_style(Btn::Ghost))
-            .on_press(Message::About)
-            .into(),
-    );
-    container(row(items).spacing(10).align_y(Alignment::Center))
-        .padding([0, 10])
-        .height(STATUSBAR_H)
-        .center_y(STATUSBAR_H)
+    // The sidebar footer shows these while it is open.
+    if !app.settings.sidebar_open {
+        right.push(sep());
+        right.push(small(tf("서버 {0}", &[&app.hosts.len()]), theme::TEXT_3));
+        right.push(
+            button(mono(format!("v{}", crate::VERSION), 11.0, theme::TEXT_3)).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::About).into(),
+        );
+    }
+    let bar = row![
+        row(left).spacing(10).align_y(Alignment::Center),
+        Space::new().width(Length::Fill),
+        row(right).spacing(12).align_y(Alignment::Center),
+    ]
+    .align_y(Alignment::Center);
+    container(column![rule(true), container(bar).padding([0, 16]).height(STATUSBAR_H - 1.0).center_y(STATUSBAR_H - 1.0)])
         .width(Length::Fill)
-        .style(bar_style)
+        .style(fill(theme::BG_1))
         .into()
 }
 
@@ -550,6 +755,11 @@ fn body(app: &CoShell) -> El<'_> {
                     .active(app.terminal_active(tab))
                     .focus_request(app.term_focus.0, app.term_focus.1)
                     .into();
+            // Block view on top while the shell is at a prompt or running a plain command;
+            // full-screen programs get the raw terminal.
+            if let Some(screen) = app.screen_of(tab) {
+                return stack![term, opaque(crate::ui_term::view(app, tab, screen))].into();
+            }
             let mut layers = vec![term];
             if tab.exited {
                 layers.push(exited_banner(tab));
@@ -592,25 +802,33 @@ fn search_bar(s: &Search) -> El<'_> {
     let has_query = !s.query.is_empty();
     let card = container(
         row![
+            crate::icons::tinted(&SEARCH, 14.0, theme::TEXT_2),
             text_input(tr("터미널 출력 검색"), &s.query)
                 .id(SEARCH_INPUT)
                 .on_input(Message::SearchQuery)
                 .on_submit(Message::SearchNext(false))
-                .size(12.5)
-                .padding([5, 9])
-                .width(SEARCH_BAR_INPUT_W)
-                .style(input_style),
+                .font(crate::fonts::MONO)
+                .size(12)
+                .padding([5, 0])
+                .width(Length::Fill)
+                .style(bare_input_style),
             status,
             btn("↑", Btn::Ghost, has_query.then_some(Message::SearchNext(false))),
             btn("↓", Btn::Ghost, has_query.then_some(Message::SearchNext(true))),
-            btn("×", Btn::Ghost, Some(Message::SearchClose)),
+            icon_btn(&X, tr("닫기"), Btn::Ghost, Some(Message::SearchClose)),
         ]
-        .spacing(4)
+        .spacing(6)
         .align_y(Alignment::Center),
     )
-    .padding(6)
-    .style(card_style(theme::LINE_2));
-    container(opaque(card)).width(Length::Fill).align_right(Length::Fill).padding(Padding { top: SEARCH_BAR_TOP, right: 16.0, bottom: 0.0, left: 0.0 }).into()
+    .padding(Padding { top: 4.0, right: 4.0, bottom: 4.0, left: 12.0 })
+    .max_width(SEARCH_BAR_INPUT_W + 170.0)
+    .style(|_| container::Style {
+        background: Some(Background::Color(alpha(theme::BG_1, 0.97))),
+        border: Border { color: theme::LINE_2, width: 1.0, radius: R_CARD.into() },
+        shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.4), offset: iced::Vector::new(0.0, 8.0), blur_radius: 24.0 },
+        ..Default::default()
+    });
+    container(opaque(card)).width(Length::Fill).align_right(Length::Fill).padding(Padding { top: SEARCH_BAR_TOP, right: 16.0, bottom: 0.0, left: 16.0 }).into()
 }
 
 fn close_dialog(tab: &Tab) -> El<'_> {
@@ -799,93 +1017,102 @@ fn palette(app: &CoShell) -> El<'_> {
                     let user = e.user.as_deref().map(|u| format!("{u}@")).unwrap_or_default();
                     let port = e.port.filter(|p| *p != coshell_ssh::DEFAULT_PORT).map(|p| format!(":{p}")).unwrap_or_default();
                     let via = e.proxy_jump.as_deref().map(|j| format!("  ·  via {}", j.replace(',', " › "))).unwrap_or_default();
-                    let title = app.display_of(&e.alias);
+                    let name = app.display_of(&e.alias);
+                    let title = match app.env_of(&e.alias) {
+                        Env::None => name,
+                        env => format!("{} · {name}", env.label()),
+                    };
                     (title, format!("{user}{}{port}{via}", e.host()))
                 }
                 PaletteItem::Direct(q) => (tf("직접 접속: {0}", &[&q]), tr("~/.ssh/config 규칙 적용").into()),
                 PaletteItem::NewLocal => (tr("새 로컬 셸").into(), "⌘T".into()),
-                PaletteItem::NewHost => (tr("새 서버 추가").into(), tr("CoShell에 저장").into()),
+                PaletteItem::NewHost => (tr("새 SSH 호스트 추가").into(), tr("연결 설정").into()),
                 PaletteItem::Servers => (tr("서버 관리").into(), "⌘O".into()),
                 PaletteItem::Settings => (tr("설정").into(), "⌘,".into()),
                 PaletteItem::About => (tr("CoShell 정보").into(), tf("버전 {0}", &[&crate::VERSION])),
+                PaletteItem::AiCheck => (tr("현재 서버 자동 헬스체크 실행").into(), tr("AI 진단").into()),
+                PaletteItem::AiAttach => (tr("터미널 출력을 AI 질문에 첨부").into(), tr("출력 첨부").into()),
+                PaletteItem::NewChat => (tr("새 AI 대화 시작").into(), tr("새 대화").into()),
+                PaletteItem::Tunnels => (tr("포트 터널 열기").into(), tr("터널").into()),
+                PaletteItem::ClearTerm => (tr("현재 터미널 화면 지우기").into(), "clear".into()),
+            };
+            let kind = match item {
+                PaletteItem::Host(_) | PaletteItem::Direct(_) => tr("서버 전환"),
+                PaletteItem::AiCheck | PaletteItem::AiAttach | PaletteItem::NewChat => tr("AI 코파일럿"),
+                PaletteItem::NewHost | PaletteItem::Servers | PaletteItem::Tunnels => tr("호스트"),
+                PaletteItem::NewLocal | PaletteItem::ClearTerm => tr("터미널"),
+                PaletteItem::Settings | PaletteItem::About => "CoShell",
             };
             let selected = i == p.selected;
-            let (env, edit) = match item {
-                PaletteItem::Host(h) => {
-                    let alias = app.hosts[*h].alias.clone();
-                    (app.env_of(&alias), Some(alias))
-                }
-                _ => (Env::None, None),
-            };
-            let bar = env_color(env);
-            let main = button(
+            let tag = container(text(kind).size(10).color(theme::TEXT_2)).padding([2, 8]).style(|_| container::Style {
+                background: Some(Background::Color(theme::BG_0)),
+                border: Border { color: theme::LINE, width: 1.0, radius: 4.0.into() },
+                ..Default::default()
+            });
+            button(
                 row![
-                    container(Space::new()).width(3).height(28).style(move |_| container::Style {
-                        background: bar.map(Background::Color),
-                        border: Border { radius: 2.0.into(), ..Default::default() },
-                        ..Default::default()
-                    }),
-                    column![row![text(title).size(13), env_tag(env)].spacing(8).align_y(Alignment::Center), mono(sub, 11.0, theme::TEXT_3)]
-                        .spacing(2),
+                    column![
+                        text(title).size(12).font(MEDIUM).color(if selected { theme::EMERALD_300 } else { theme::SLATE_100 }),
+                        mono(sub, 11.0, theme::TEXT_3)
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    tag,
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
             )
             .width(Length::Fill)
-            .padding([7, 10])
+            .padding([10, 12])
             .on_press(Message::PalettePick(item.clone()))
             .style(move |_, status| button::Style {
                 background: Some(Background::Color(
                     if selected || matches!(status, button::Status::Hovered) { theme::BG_3 } else { Color::TRANSPARENT },
                 )),
                 text_color: theme::TEXT,
-                border: Border { radius: R_CONTROL.into(), ..Default::default() },
+                border: Border { radius: R_CARD.into(), ..Default::default() },
                 ..Default::default()
-            });
-            match edit {
-                Some(alias) => row![
-                    main,
-                    button(text(tr("편집")).size(11).color(theme::TEXT_3)).padding([4, 8]).style(btn_style(Btn::Ghost)).on_press(Message::HostEdit(alias))
-                ]
-                .align_y(Alignment::Center)
-                .into(),
-                None => main.into(),
-            }
+            })
+            .into()
         })
         .collect();
     let list: El<'_> = if rows.is_empty() {
-        container(muted(tr("일치하는 서버가 없습니다"))).padding(16).into()
+        container(text(tr("검색 결과가 없습니다.")).size(12).color(theme::TEXT_3)).center_x(Length::Fill).padding([24, 0]).into()
     } else {
-        scrollable(column(rows).spacing(2).padding(6)).height(Length::Shrink).into()
+        scrollable(column(rows).spacing(4).padding(8)).height(Length::Shrink).into()
     };
     let card = container(
         column![
             container(
-                text_input(tr("서버 이름, 주소 또는 user@host:port"), &p.query)
-                    .id(PALETTE_INPUT)
-                    .on_input(Message::PaletteQuery)
-                    .on_submit(Message::PaletteSubmit)
-                    .size(14)
-                    .padding([10, 12])
-                    .style(input_style)
+                row![
+                    crate::icons::tinted(&SEARCH, 16.0, theme::ACCENT_TX),
+                    text_input(tr("서버 전환, 빠른 명령어 실행, AI 진단..."), &p.query)
+                        .id(PALETTE_INPUT)
+                        .on_input(Message::PaletteQuery)
+                        .on_submit(Message::PaletteSubmit)
+                        .size(14)
+                        .padding([2, 0])
+                        .style(bare_input_style),
+                    kbd("ESC"),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center)
             )
-            .padding(10),
+            .padding([12, 16]),
+            rule(true),
             container(list).max_height(PALETTE_LIST_H),
-            container(
-                row![muted(tr("↑↓ 이동")), muted(tr("⏎ 연결")), muted(tr("esc 닫기")), Space::new().width(Length::Fill), muted(tf("~/.ssh/config · {0}개", &[&app.hosts.len()]))]
-                    .spacing(16)
-            )
-            .padding([8, 14]),
         ],
     )
     .width(PALETTE_W)
+    .clip(true)
     .style(card_style(theme::LINE_2));
     let scrim = mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill).style(|_| container::Style {
         background: Some(Background::Color(theme::SCRIM)),
         ..Default::default()
     }))
     .on_press(Message::ClosePalette);
-    stack![scrim, container(card).center_x(Length::Fill).padding(Padding::ZERO.top(90))].into()
+    let top = app.settings.window.height * 0.12;
+    stack![scrim, container(card).center_x(Length::Fill).padding(Padding { top, right: 16.0, bottom: 16.0, left: 16.0 })].into()
 }
 
 // ------------------------------------------------------------------ dialogs
@@ -944,7 +1171,7 @@ fn hostkey_dialog<'a>(tab: &'a Tab, q: &'a HostKeyQuery, confirm: &'a str) -> El
                     text_input(tr("서버 주소 입력"), confirm)
                         .id(CONFIRM_INPUT)
                         .on_input(move |s| Message::HostKeyConfirm(id, s))
-                        .font(Font::MONOSPACE)
+                        .font(crate::fonts::MONO)
                         .size(12)
                         .padding([7, 10])
                         .style(input_style),
@@ -992,7 +1219,7 @@ fn interactive_dialog<'a>(tab: &'a Tab, q: &'a InteractiveQuery, answers: &'a [Z
             .id(prompt_input_id(i))
             .on_input(move |s| Message::PromptInput(id, i, s))
             .secure(!p.echo)
-            .font(Font::MONOSPACE)
+            .font(crate::fonts::MONO)
             .size(13)
             .padding([8, 10])
             .style(input_style);

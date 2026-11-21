@@ -16,7 +16,7 @@ use iced::advanced::text::{self, Paragraph as _, Renderer as _};
 use iced::advanced::widget::{self, Tree, Widget};
 use iced::advanced::{Clipboard, InputMethod, Shell, input_method, mouse};
 use iced::keyboard::{self, key::Named};
-use iced::{Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Theme, window};
+use iced::{Color, Element, Event, Length, Pixels, Point, Rectangle, Size, Theme, window};
 
 type Renderer = iced::Renderer;
 type Paragraph = <Renderer as text::Renderer>::Paragraph;
@@ -177,7 +177,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
             bounds: Size::INFINITE,
             size,
             line_height: text::LineHeight::Absolute(Pixels(line)),
-            font: Font::DEFAULT,
+            font: crate::fonts::SANS,
             align_x: text::Alignment::Default,
             align_y: iced::alignment::Vertical::Top,
             shaping: text::Shaping::Advanced,
@@ -195,7 +195,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
                     bounds: room.size(),
                     size,
                     line_height: text::LineHeight::Absolute(Pixels(line)),
-                    font: Font::DEFAULT,
+                    font: crate::fonts::SANS,
                     align_x: text::Alignment::Default,
                     align_y: iced::alignment::Vertical::Top,
                     shaping: text::Shaping::Advanced,

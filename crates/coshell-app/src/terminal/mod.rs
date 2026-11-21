@@ -83,7 +83,7 @@ impl<'a, Message> TerminalView<'a, Message> {
             term,
             size,
             palette,
-            font: Font::MONOSPACE,
+            font: crate::fonts::MONO,
             font_size: 13.0,
             on_input: Box::new(on_input),
             on_resize: Box::new(on_resize),

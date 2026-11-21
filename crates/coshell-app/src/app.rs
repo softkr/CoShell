@@ -30,7 +30,10 @@ pub const PALETTE_INPUT: &str = "palette-input";
 const STATS_REFRESH: Duration = Duration::from_secs(1);
 pub const CONFIRM_INPUT: &str = "hostkey-confirm";
 pub const SEARCH_INPUT: &str = "term-search";
+/// The `#` AI question typed at a block-view prompt.
+pub const ASK_INPUT: &str = "term-ask";
 pub const RENAME_INPUT: &str = "tab-rename";
+pub const SIDEBAR_SEARCH_INPUT: &str = "sidebar-search";
 /// Two clicks on the active tab within this time start a rename.
 const TAB_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const TAB_NAME_MAX_CHARS: usize = 40;
@@ -48,6 +51,8 @@ const AGENT_POLL: std::time::Duration = std::time::Duration::from_millis(150);
 const AGENT_WATCH_ROWS: usize = 600;
 /// Remembered state (window size, zoom, panel) is written this long after it last changed.
 const PERSIST_DELAY: Duration = Duration::from_secs(2);
+/// How often running block commands are checked for being done.
+const BLOCK_TICK: Duration = Duration::from_millis(100);
 pub fn prompt_input_id(i: usize) -> String {
     format!("prompt-{i}")
 }
@@ -191,6 +196,12 @@ pub struct Tab {
     /// Passwords the user asked to save: written to the keychain only once
     /// the connection succeeds. (keychain account, password)
     pub(crate) save_passwords: Vec<(String, Zeroizing<String>)>,
+    /// Commands seen starting here (who ran them, when, how long): shown on the blocks.
+    pub metas: Vec<crate::blocks::Meta>,
+    /// How this session's prompt looks, once one has been seen.
+    pub sig: Option<crate::blocks::Sig>,
+    /// Live resource figures (CPU, memory, disk) and the server's OS, polled while connected.
+    pub stats: Option<crate::metrics::Stats>,
 }
 
 impl Tab {
@@ -215,6 +226,15 @@ pub enum PaletteItem {
     Servers,
     Settings,
     About,
+    /// AI health check of the active session.
+    AiCheck,
+    /// Attach the active terminal's recent output to the AI question.
+    AiAttach,
+    /// Start a new AI conversation for the active session.
+    NewChat,
+    /// Port tunnels of the active SSH session.
+    Tunnels,
+    ClearTerm,
 }
 
 /// Update check started by opening "About CoShell".
@@ -356,8 +376,38 @@ pub struct CoShell {
     /// Tab being renamed and the text typed so far.
     pub rename: Option<(TabId, String)>,
     last_tab_click: Option<(TabId, std::time::Instant)>,
-    /// The AI panel divider is being dragged.
-    ai_resizing: bool,
+    /// The divider being dragged (left sidebar or AI panel).
+    resizing: Option<Divider>,
+    /// Left sidebar: servers or snippets.
+    pub sidebar_tab: SidebarTab,
+    /// Server search box in the sidebar is shown.
+    pub sidebar_search: bool,
+    /// Collapsed server groups in the sidebar.
+    pub collapsed_groups: Vec<String>,
+    /// Block under the pointer in the block view.
+    pub block_hover: Option<usize>,
+    /// A `#` question being typed at a block-view prompt (tab, text with its `#`). Typed
+    /// here rather than in the shell so the IME composes it like any text field.
+    pub ask: Option<(TabId, String)>,
+    /// The question's last syllable was put back together from split pieces ([`crate::hangul`]).
+    ask_joined: bool,
+    /// Production safety lock: changing commands on a production server need a second click.
+    /// Destructive commands always do. Session only; starts on.
+    pub prod_guard: bool,
+}
+
+/// A draggable divider between panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divider {
+    Sidebar,
+    Ai,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SidebarTab {
+    #[default]
+    Servers,
+    Snippets,
 }
 
 pub struct HostEditor {
@@ -424,9 +474,51 @@ pub enum Message {
     TabRenameCancel,
     NoticeDismiss,
     AiResizeStart,
-    /// Cursor x while dragging the divider.
+    SidebarResizeStart,
+    /// Cursor x while dragging a divider.
     AiResizeTo(f32),
     AiResizeEnd,
+    /// Show / hide the left sidebar.
+    SidebarToggle,
+    /// Show / hide the status bar.
+    StatusBarToggle,
+    SidebarTab(SidebarTab),
+    SidebarSearch,
+    /// Fold / unfold a server group in the sidebar.
+    GroupToggle(String),
+    /// A built-in snippet: (index, run it = type + Enter; otherwise only type it).
+    Snippet(usize, bool),
+    /// Type a command into the active terminal without running it.
+    TermInsert(String),
+    /// Clear the active terminal screen (Ctrl+L).
+    TermClear,
+    /// Save the active session (screen text + AI chat) as Markdown.
+    ExportSession,
+    ExportSaved(Result<Option<String>, String>),
+    /// Ask the AI for a quick health check of the active session.
+    AiDiagnose,
+    /// Turn the production safety lock on / off.
+    ProdGuard,
+    /// Cancel a pending "click again to run".
+    AiRunCancel(TabId),
+    /// Poll the active session's resource figures.
+    StatsTick,
+    Stats(TabId, Result<crate::metrics::Stats, String>),
+    /// Check whether running block commands are back at a prompt.
+    BlockTick,
+    /// The pointer is over this block (its actions show).
+    BlockHover(Option<usize>),
+    /// Ask the AI about one block: (tab, command, output).
+    BlockAsk(TabId, String, String),
+    /// Give the keyboard back to the terminal (a click on the block view).
+    FocusTerminal,
+    /// The `#` question at the prompt was edited (empty: back to the shell).
+    AskInput(String),
+    /// Send the `#` question to the AI.
+    AskSubmit,
+    AskCancel,
+    /// Drop the scrollback after the screen was cleared.
+    ClearHistory(TabId),
     NewLocal,
     OpenPalette,
     ClosePalette,
@@ -573,6 +665,8 @@ pub enum Shortcut {
     CloseTab,
     Nth(usize),
     AiPanel,
+    Sidebar,
+    StatusBar,
     Servers,
     Settings,
     /// Tab / Shift+Tab inside a dialog; `true` = backwards.
@@ -629,7 +723,8 @@ impl CoShell {
             Arc::new(Keychain(PASSWORD_SERVICE)),
         );
         app.notice = (!warnings.is_empty()).then(|| warnings.join(" · "));
-        app.ai.open = prefs.ai_panel_open;
+        // The AI panel starts closed: ⌘L, the header button or asking from the terminal opens it.
+        app.ai.open = false;
         app.settings = prefs;
         app.settings_path = settings_path;
         app.apply_settings();
@@ -694,14 +789,21 @@ impl CoShell {
             settings: Settings::default(),
             settings_path: None,
             settings_draft: None,
-            term_font: iced::Font::MONOSPACE,
+            term_font: crate::fonts::MONO,
             term_font_name: String::new(),
             state_dirty: false,
             search: None,
             close_confirm: None,
             rename: None,
             last_tab_click: None,
-            ai_resizing: false,
+            resizing: None,
+            sidebar_tab: SidebarTab::Servers,
+            sidebar_search: false,
+            collapsed_groups: Vec::new(),
+            prod_guard: true,
+            block_hover: None,
+            ask: None,
+            ask_joined: false,
         };
         app.rebuild_config();
         app
@@ -769,6 +871,9 @@ impl CoShell {
             alias: None,
             auto_forwards: Vec::new(),
             save_passwords: Vec::new(),
+            metas: Vec::new(),
+            sig: None,
+            stats: None,
             spec: Some((vec![host], app_opts(PathBuf::from("/nonexistent")))),
         });
         self.active = Some(id);
@@ -850,7 +955,7 @@ impl CoShell {
         if self.settings.font_family != self.term_font_name {
             self.term_font_name = self.settings.font_family.clone();
             self.term_font = if self.term_font_name.is_empty() {
-                iced::Font::MONOSPACE
+                crate::fonts::MONO
             } else {
                 // iced wants a 'static family name; this leaks one short string per font change.
                 iced::Font::with_name(Box::leak(self.term_font_name.clone().into_boxed_str()))
@@ -1050,6 +1155,11 @@ impl CoShell {
         }
     }
 
+    /// The active tab while its session is running.
+    pub fn live_tab(&self) -> Option<&Tab> {
+        self.active_tab().filter(|t| matches!(t.phase, Phase::Live(_)) && !t.exited)
+    }
+
     fn live_session(&self) -> Option<&Session> {
         match self.active_tab() {
             Some(Tab { phase: Phase::Live(s), .. }) => Some(s),
@@ -1093,8 +1203,27 @@ impl CoShell {
     }
 
     fn focus_terminal(&mut self) -> Task<Message> {
+        if self.ask.as_ref().is_some_and(|(id, _)| Some(*id) == self.active) {
+            return self.focus_ask();
+        }
         self.term_focus = (self.term_focus.0 + 1, true);
         iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
+    }
+
+    fn focus_ask(&mut self) -> Task<Message> {
+        self.term_focus = (self.term_focus.0 + 1, false);
+        iced::widget::operation::focus(ASK_INPUT)
+    }
+
+    /// Ask the AI from the terminal: opens the panel if needed.
+    fn ask_from_terminal(&mut self, id: TabId, q: String) -> Task<Message> {
+        if !self.ai.open {
+            self.ai.open = true;
+            self.settings.ai_panel_open = true;
+            self.state_dirty = true;
+        }
+        self.notice = Some(tr("터미널에서 AI에게 질문을 전달했습니다").into());
+        self.update(Message::AiSuggest(id, q, false))
     }
 
     fn focus_ai(&mut self) -> Task<Message> {
@@ -1121,6 +1250,144 @@ impl CoShell {
         } else {
             tab.chat.attachment = Some(a);
         }
+    }
+
+    /// The blocks of a tab when block view applies (live, a prompt seen, no full-screen program).
+    pub fn screen_of(&self, tab: &Tab) -> Option<crate::blocks::Screen> {
+        let Phase::Live(s) = &tab.phase else { return None };
+        if !self.settings.block_view || tab.exited || crate::blocks::alt_screen(s.term()) {
+            return None;
+        }
+        let sig = tab.sig.as_ref()?;
+        Some(crate::blocks::parse(&coshell_term::logical_lines(s.term(), crate::blocks::BLOCK_ROWS), sig))
+    }
+
+    /// Keys for the shell. In block view, Enter on `# question` asks the AI instead, Enter
+    /// on a command records when it started, and Tab / → take the inline suggestion.
+    fn terminal_input(&mut self, id: TabId, bytes: Vec<u8>) -> Task<Message> {
+        let special = matches!(bytes.as_slice(), b"\r" | b"\t" | b"\x1b[C" | b"\x1bOC" | b"#");
+        let typed = if special {
+            self.tabs.iter().find(|t| t.id == id).and_then(|t| self.screen_of(t)).and_then(|s| s.current).map(|(_, typed)| typed)
+        } else {
+            None
+        };
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+        let Tab { phase: Phase::Live(s), exited: false, metas, .. } = tab else { return Task::none() };
+        let Some(typed) = typed else {
+            s.write(&bytes);
+            return Task::none();
+        };
+        match bytes.as_slice() {
+            b"\r" => {
+                if let Some(q) = typed.trim_start().strip_prefix('#') {
+                    // Clear the line in the shell (end, then kill to start) and ask the AI.
+                    s.write(b"\x05\x15");
+                    let q = q.trim().to_string();
+                    if q.is_empty() {
+                        return Task::none();
+                    }
+                    return self.ask_from_terminal(id, q);
+                }
+                if !typed.trim().is_empty() {
+                    metas.push(crate::blocks::Meta::new(&typed, crate::blocks::Source::User));
+                }
+                s.write(&bytes);
+            }
+            // `#` at an empty prompt starts a question for the AI, typed in the app.
+            b"#" if typed.is_empty() => {
+                self.ask = Some((id, "#".into()));
+                self.ask_joined = false;
+                return self.focus_ask();
+            }
+            b"#" => s.write(&bytes),
+            _ => match crate::blocks::ghost(&typed, metas) {
+                // → only accepts at the end of the line.
+                Some(rest) if bytes == b"\t" || crate::blocks::cursor_tail(s.term()) == 0 => s.write(rest.as_bytes()),
+                _ => s.write(&bytes),
+            },
+        }
+        Task::none()
+    }
+
+    /// Note when commands that were running are back at a prompt.
+    fn block_tick(&mut self) {
+        let done: Vec<TabId> = self
+            .tabs
+            .iter()
+            .filter(|t| t.metas.last().is_some_and(|m| m.took.is_none()))
+            .filter(|t| match &t.phase {
+                Phase::Live(s) => coshell_term::logical_lines(s.term(), 1).pop().is_some_and(|l| crate::blocks::sig_of(&l).is_some()),
+                _ => true,
+            })
+            .map(|t| t.id)
+            .collect();
+        for id in done {
+            if let Some(t) = self.tab_mut(id) {
+                for m in t.metas.iter_mut().filter(|m| m.took.is_none()) {
+                    m.took = Some(m.started.elapsed());
+                }
+            }
+        }
+    }
+
+    /// Type `cmd` at the active terminal's prompt; `run` also presses Enter.
+    fn type_into_terminal(&mut self, cmd: &str, run: bool) -> Task<Message> {
+        let Some(Tab { phase: Phase::Live(s), exited: false, .. }) = self.active_tab() else {
+            self.notice = Some(tr("열린 터미널이 없습니다").into());
+            return Task::none();
+        };
+        let bracketed = s.term().lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+        let bytes = if run { assist::run_bytes(cmd, bracketed) } else { assist::insert_bytes(cmd, bracketed) };
+        match bytes {
+            Some(b) => {
+                s.write(&b);
+                if run && let Some(t) = self.active.and_then(|id| self.tab_mut(id)) {
+                    t.metas.push(crate::blocks::Meta::new(cmd, crate::blocks::Source::User));
+                }
+            }
+            None => self.notice = Some(tr("여러 줄은 복사해서 사용").into()),
+        }
+        self.focus_terminal()
+    }
+
+    /// The active session as Markdown: the screen and scrollback, then the AI conversation.
+    fn session_markdown(&self) -> Option<(String, String)> {
+        let tab = self.active_tab()?;
+        let Phase::Live(s) = &tab.phase else { return None };
+        let target = if tab.is_local() { coshell_term::local_shell_name().to_string() } else { tab.route.last().cloned().unwrap_or_default() };
+        let mut md = format!("# CoShell — {}\n\n", tab.display_name());
+        md.push_str(&format!("- {}: `{target}`\n", tr("대상")));
+        if tab.env != Env::None {
+            md.push_str(&format!("- {}: {}\n", tr("환경"), tab.env.label()));
+        }
+        md.push_str(&format!("\n## {}\n\n```text\n{}\n```\n", tr("터미널"), s.recent_text(self.settings.scrollback).trim_end()));
+        let turns: Vec<&Turn> = tab.chat.turns.iter().filter(|t| !t.hidden && !t.text.trim().is_empty()).collect();
+        if !turns.is_empty() {
+            md.push_str(&format!("\n## {}\n", tr("AI 대화")));
+            for t in turns {
+                let who = if t.role == Role::User { tr("사용자").to_string() } else { format!("AI · {}", t.model) };
+                md.push_str(&format!("\n### {who}\n\n{}\n", t.text.trim()));
+            }
+        }
+        let file: String = tab.display_name().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+        Some((format!("coshell-{}.md", file.trim_matches('-')), md))
+    }
+
+    fn export_session(&mut self) -> Task<Message> {
+        let Some((name, md)) = self.session_markdown() else {
+            self.notice = Some(tr("열린 터미널이 없습니다").into());
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                let Some(f) = rfd::AsyncFileDialog::new().set_file_name(&name).add_filter("Markdown", &["md"]).save_file().await else {
+                    return Ok(None);
+                };
+                std::fs::write(f.path(), md).map_err(|e| e.to_string())?;
+                Ok(Some(f.path().display().to_string()))
+            },
+            Message::ExportSaved,
+        )
     }
 
     fn ai_send(&mut self, id: TabId) -> Task<Message> {
@@ -1156,10 +1423,13 @@ impl CoShell {
             alias: None,
             auto_forwards: Vec::new(),
             save_passwords: Vec::new(),
+            metas: Vec::new(),
+            sig: None,
+            stats: None,
             spec: None,
         });
         self.active = Some(id);
-        task
+        Task::batch([task, Task::done(Message::StatsTick)])
     }
 
     fn open_ssh(
@@ -1189,6 +1459,9 @@ impl CoShell {
             alias: None,
             auto_forwards: forwards,
             save_passwords: Vec::new(),
+            metas: Vec::new(),
+            sig: None,
+            stats: None,
             spec: Some((chain, opts)),
         });
         self.active = Some(id);
@@ -1268,6 +1541,20 @@ impl CoShell {
         if q.is_empty() || "coshell 정보 버전 about version".contains(&q) {
             items.push(PaletteItem::About);
         }
+        let live = self.live_tab().is_some();
+        let ssh = self.live_tab().is_some_and(|t| !t.is_local());
+        let actions = [
+            (live, "ai 코파일럿 헬스체크 진단 health check", PaletteItem::AiCheck),
+            (live, "ai 출력 첨부 attach output", PaletteItem::AiAttach),
+            (self.active.is_some(), "ai 새 대화 new chat", PaletteItem::NewChat),
+            (ssh, "포트 터널 tunnel port forward", PaletteItem::Tunnels),
+            (live, "터미널 화면 지우기 clear", PaletteItem::ClearTerm),
+        ];
+        for (ok, keys, item) in actions {
+            if ok && (q.is_empty() || keys.contains(&q)) {
+                items.push(item);
+            }
+        }
         items
     }
 
@@ -1291,6 +1578,18 @@ impl CoShell {
                 self.connect_alias(&alias)
             }
             PaletteItem::Direct(q) => self.open_target(&q, q.clone()),
+            PaletteItem::AiCheck => self.update(Message::AiDiagnose),
+            PaletteItem::ClearTerm => self.update(Message::TermClear),
+            PaletteItem::Tunnels => self.update(Message::TunnelPanel),
+            PaletteItem::AiAttach | PaletteItem::NewChat => {
+                let Some(id) = self.active else { return Task::none() };
+                if !self.ai.open {
+                    self.ai.open = true;
+                    self.settings.ai_panel_open = true;
+                    self.state_dirty = true;
+                }
+                self.update(if item == PaletteItem::AiAttach { Message::AiAttach(id) } else { Message::AiNewChat(id) })
+            }
         }
     }
 
@@ -1305,6 +1604,12 @@ impl CoShell {
                         TermEvent::Wakeup => {
                             if let Phase::Live(s) = &tab.phase {
                                 s.clear_dirty();
+                                // A bare prompt at the bottom tells how prompt lines look here.
+                                if let Some(last) = coshell_term::logical_lines(s.term(), 1).pop()
+                                    && let Some(sig) = crate::blocks::sig_of(&last)
+                                {
+                                    tab.sig = Some(sig);
+                                }
                             }
                         }
                         TermEvent::Title(t) => tab.title = t,
@@ -1319,12 +1624,7 @@ impl CoShell {
                 }
                 Task::none()
             }
-            Message::Input(id, bytes) => {
-                if let Some(Tab { phase: Phase::Live(s), exited: false, .. }) = self.tab_mut(id) {
-                    s.write(&bytes);
-                }
-                Task::none()
-            }
+            Message::Input(id, bytes) => self.terminal_input(id, bytes),
             Message::Resize(id, size) => {
                 if let Some(Tab { phase: Phase::Live(s), .. }) = self.tab_mut(id) {
                     s.resize(size);
@@ -1346,7 +1646,8 @@ impl CoShell {
                     return Task::batch([iced::widget::operation::focus(RENAME_INPUT), iced::widget::operation::select_all(RENAME_INPUT)]);
                 }
                 self.rename = None;
-                self.focus_prompt()
+                let stats = if self.tabs.iter().any(|t| t.id == id && t.stats.is_none()) { Task::done(Message::StatsTick) } else { Task::none() };
+                Task::batch([stats, self.focus_prompt()])
             }
             Message::TabRename(text) => {
                 if let Some((_, name)) = &mut self.rename {
@@ -1468,18 +1769,200 @@ impl CoShell {
                 Task::none()
             }
             Message::AiResizeStart => {
-                self.ai_resizing = true;
+                self.resizing = Some(Divider::Ai);
+                Task::none()
+            }
+            Message::SidebarResizeStart => {
+                self.resizing = Some(Divider::Sidebar);
                 Task::none()
             }
             Message::AiResizeTo(x) => {
-                let room = (self.settings.window.width - TERMINAL_MIN_W).max(settings::AI_PANEL_W_MIN);
-                let max = settings::AI_PANEL_W_MAX.min(room);
-                self.settings.ai_panel_width = (self.settings.window.width - x).clamp(settings::AI_PANEL_W_MIN, max);
+                let w = self.settings.window.width;
+                let side = if self.settings.sidebar_open { self.settings.sidebar_width } else { 0.0 };
+                let ai = if self.ai.open { self.settings.ai_panel_width } else { 0.0 };
+                match self.resizing {
+                    Some(Divider::Ai) => {
+                        let room = (w - side - TERMINAL_MIN_W).max(settings::AI_PANEL_W_MIN);
+                        let max = settings::AI_PANEL_W_MAX.min(room);
+                        self.settings.ai_panel_width = (w - x).clamp(settings::AI_PANEL_W_MIN, max);
+                    }
+                    Some(Divider::Sidebar) => {
+                        let room = (w - ai - TERMINAL_MIN_W).max(settings::SIDEBAR_W_MIN);
+                        let max = settings::SIDEBAR_W_MAX.min(room);
+                        self.settings.sidebar_width = x.clamp(settings::SIDEBAR_W_MIN, max);
+                    }
+                    None => return Task::none(),
+                }
                 self.state_dirty = true;
                 Task::none()
             }
             Message::AiResizeEnd => {
-                self.ai_resizing = false;
+                self.resizing = None;
+                Task::none()
+            }
+            Message::SidebarToggle => {
+                self.settings.sidebar_open = !self.settings.sidebar_open;
+                self.state_dirty = true;
+                Task::none()
+            }
+            Message::StatusBarToggle => {
+                self.settings.statusbar_open = !self.settings.statusbar_open;
+                self.state_dirty = true;
+                Task::none()
+            }
+            Message::SidebarTab(t) => {
+                self.sidebar_tab = t;
+                Task::none()
+            }
+            Message::SidebarSearch => {
+                self.sidebar_search = !self.sidebar_search;
+                if self.sidebar_search {
+                    self.term_focus = (self.term_focus.0 + 1, false);
+                    iced::widget::operation::focus(SIDEBAR_SEARCH_INPUT)
+                } else {
+                    self.host_filter.clear();
+                    self.focus_terminal()
+                }
+            }
+            Message::GroupToggle(g) => {
+                match self.collapsed_groups.iter().position(|x| *x == g) {
+                    Some(i) => {
+                        self.collapsed_groups.remove(i);
+                    }
+                    None => self.collapsed_groups.push(g),
+                }
+                Task::none()
+            }
+            Message::Snippet(i, run) => match crate::ui_sidebar::SNIPPETS.get(i) {
+                Some(sn) => self.type_into_terminal(sn.cmd, run),
+                None => Task::none(),
+            },
+            Message::TermInsert(cmd) => self.type_into_terminal(&cmd, false),
+            Message::TermClear => {
+                let Some(id) = self.active else { return Task::none() };
+                if let Some(t) = self.tab_mut(id)
+                    && let Phase::Live(s) = &t.phase
+                    && !t.exited
+                {
+                    s.write(b"\x0c");
+                    t.metas.clear();
+                }
+                // Once the shell has redrawn its prompt, the old screen is in the scrollback: drop it.
+                let later = Task::perform(tokio::time::sleep(Duration::from_millis(150)), move |_| Message::ClearHistory(id));
+                Task::batch([later, self.focus_terminal()])
+            }
+            Message::ClearHistory(id) => {
+                if let Some(Tab { phase: Phase::Live(s), .. }) = self.tab_mut(id) {
+                    s.term().lock().grid_mut().clear_history();
+                }
+                Task::none()
+            }
+            Message::StatsTick => {
+                let Some(t) = self.live_tab() else { return Task::none() };
+                let id = t.id;
+                match (&t.conn, t.is_local()) {
+                    (Some(c), false) => Task::perform(crate::metrics::remote(c.clone()), move |r| Message::Stats(id, r)),
+                    (_, true) => Task::perform(crate::metrics::local(), move |r| Message::Stats(id, r)),
+                    _ => Task::none(),
+                }
+            }
+            Message::Stats(id, r) => {
+                if let (Some(t), Ok(st)) = (self.tab_mut(id), r) {
+                    // The OS name is read once; keep it when a later poll misses it.
+                    let os = st.os.clone().or_else(|| t.stats.as_ref().and_then(|o| o.os.clone()));
+                    t.stats = Some(crate::metrics::Stats { os, ..st });
+                }
+                Task::none()
+            }
+            Message::BlockTick => {
+                self.block_tick();
+                Task::none()
+            }
+            Message::BlockHover(h) => {
+                self.block_hover = h;
+                Task::none()
+            }
+            Message::BlockAsk(id, cmd, output) => {
+                let prod = self.tabs.iter().find(|t| t.id == id).is_some_and(|t| t.env == Env::Prod);
+                let (masked, secrets) = coshell_ai::redact::mask(&format!("$ {cmd}\n{output}"));
+                let a = Attachment { label: tf("블록: {0}", &[&cmd.chars().take(40).collect::<String>()]), masked, secrets };
+                let question = tf("방금 실행한 `{0}` 결과를 분석하고 필요한 조치를 알려줘.", &[&cmd]);
+                if !self.ai.open {
+                    self.ai.open = true;
+                    self.settings.ai_panel_open = true;
+                    self.state_dirty = true;
+                }
+                if let Some(c) = self.chat_mut(id) {
+                    c.draft = text_editor::Content::with_text(&question);
+                }
+                if prod {
+                    // Production output needs an explicit look before it can leave the machine.
+                    self.attach_confirm = Some((id, a));
+                    return Task::none();
+                }
+                if let Some(c) = self.chat_mut(id) {
+                    c.attachment = Some(a);
+                }
+                self.ai_send(id)
+            }
+            Message::FocusTerminal => self.focus_terminal(),
+            Message::AskInput(text) => {
+                if text.is_empty() {
+                    self.ask = None;
+                    return self.focus_terminal();
+                }
+                if let Some((_, q)) = &mut self.ask {
+                    *q = crate::hangul::join_split(q, &text, &mut self.ask_joined).unwrap_or(text);
+                }
+                Task::none()
+            }
+            Message::AskSubmit => {
+                let Some((id, text)) = self.ask.take() else { return Task::none() };
+                let focus = self.focus_terminal();
+                let q = text.trim_start().trim_start_matches('#').trim().to_string();
+                if q.is_empty() {
+                    return focus;
+                }
+                Task::batch([focus, self.ask_from_terminal(id, q)])
+            }
+            Message::AskCancel => {
+                self.ask = None;
+                self.focus_terminal()
+            }
+            Message::ExportSession => self.export_session(),
+            Message::ExportSaved(r) => {
+                match r {
+                    Ok(Some(path)) => self.notice = Some(tf("세션 기록을 저장했습니다: {0}", &[&path])),
+                    Ok(None) => {}
+                    Err(e) => self.notice = Some(tf("세션 기록 저장 실패: {0}", &[&e])),
+                }
+                Task::none()
+            }
+            Message::AiDiagnose => {
+                let Some(id) = self.active else { return Task::none() };
+                if !self.ai.open {
+                    self.ai.open = true;
+                    self.settings.ai_panel_open = true;
+                    self.state_dirty = true;
+                }
+                self.update(Message::AiSuggest(id, tr("이 서버의 현재 상태(디스크, 메모리, 부하)를 빠르게 진단해줘").into(), false))
+            }
+            Message::ProdGuard => {
+                self.prod_guard = !self.prod_guard;
+                self.notice = Some(
+                    if self.prod_guard {
+                        tr("운영 안전 잠금을 켰습니다: 운영 서버의 변경 명령은 한 번 더 확인합니다")
+                    } else {
+                        tr("운영 안전 잠금을 껐습니다: 위험 명령만 한 번 더 확인합니다")
+                    }
+                    .into(),
+                );
+                Task::none()
+            }
+            Message::AiRunCancel(id) => {
+                if let Some(c) = self.chat_mut(id) {
+                    c.run_confirm = None;
+                }
                 Task::none()
             }
             Message::Close(id) => {
@@ -2095,7 +2578,7 @@ impl CoShell {
     /// Type `cmd` into the tab's terminal and watch it until the prompt is back. The command
     /// is recorded on turn `index`, where it replaces its ▶ card with a progress line.
     fn run_in_terminal(&mut self, id: TabId, index: usize, cmd: String, manual: bool) -> Task<Message> {
-        let Some(Tab { phase: Phase::Live(s), exited: false, chat, .. }) = self.tabs.iter_mut().find(|t| t.id == id) else {
+        let Some(Tab { phase: Phase::Live(s), exited: false, chat, metas, .. }) = self.tabs.iter_mut().find(|t| t.id == id) else {
             return Task::none();
         };
         if chat.is_streaming() || index >= chat.turns.len() {
@@ -2105,6 +2588,7 @@ impl CoShell {
         let prompt = coshell_term::logical_lines(&term, 4).pop().unwrap_or_default();
         let bracketed = term.lock().mode().contains(coshell_term::alacritty_terminal::term::TermMode::BRACKETED_PASTE);
         let Some(bytes) = assist::run_bytes(&cmd, bracketed) else { return Task::none() };
+        metas.push(crate::blocks::Meta::new(&cmd, crate::blocks::Source::Ai));
         let execs = &mut chat.turns[index].execs;
         let exec = |state, sent| Exec { cmd: cmd.clone(), state, sent, open: false, manual };
         if !assist::looks_like_prompt(&prompt) {
@@ -2283,6 +2767,8 @@ impl CoShell {
                 None => Task::none(),
             },
             Shortcut::AiPanel => self.update(Message::AiToggle),
+            Shortcut::Sidebar => self.update(Message::SidebarToggle),
+            Shortcut::StatusBar => self.update(Message::StatusBarToggle),
             Shortcut::Servers => self.update(Message::HostView),
             Shortcut::Escape if self.host_view && !self.tabs.is_empty() && self.editor.is_none() && self.palette.is_none() => {
                 self.update(Message::HostView)
@@ -2294,6 +2780,7 @@ impl CoShell {
             Shortcut::Escape if self.search.is_some() && self.active_tab().is_none_or(|t| t.prompt.is_none()) => {
                 self.update(Message::SearchClose)
             }
+            Shortcut::Escape if self.ask.as_ref().is_some_and(|(id, _)| Some(*id) == self.active) => self.update(Message::AskCancel),
             Shortcut::Escape => match self.active {
                 Some(id) if self.active_tab().is_some_and(|t| t.prompt.is_some()) => self.update(Message::PromptCancel(id)),
                 _ => Task::none(),
@@ -2315,6 +2802,9 @@ impl CoShell {
         }
         if self.rename.as_ref().is_some_and(|(t, _)| *t == id) {
             self.rename = None;
+        }
+        if self.ask.as_ref().is_some_and(|(t, _)| *t == id) {
+            self.ask = None;
         }
     }
 
@@ -2377,7 +2867,8 @@ impl CoShell {
                         if let Some(e) = save.iter().find_map(|(key, pw)| self.passwords.set(key, pw).err()) {
                             self.notice = Some(tf("비밀번호를 키체인에 저장하지 못했습니다: {0}", &[&e]));
                         }
-                        Task::batch(std::iter::once(task).chain(forwards.into_iter().map(|f| self.start_tunnel(id, f, false))))
+                        let first_stats = Task::done(Message::StatsTick);
+                        Task::batch([task, first_stats].into_iter().chain(forwards.into_iter().map(|f| self.start_tunnel(id, f, false))))
                     }
                     Some(Err(e)) => {
                         tab.phase = Phase::Failed(e);
@@ -2507,7 +2998,7 @@ impl CoShell {
             }
             Message::AiRun(id, index, cmd) => {
                 let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
-                if assist::run_needs_confirm(&cmd, tab.env == Env::Prod) && tab.chat.run_confirm.as_deref() != Some(cmd.as_str()) {
+                if assist::run_needs_confirm(&cmd, tab.env == Env::Prod && self.prod_guard) && tab.chat.run_confirm.as_deref() != Some(cmd.as_str()) {
                     tab.chat.run_confirm = Some(cmd);
                     return Task::none();
                 }
@@ -2626,7 +3117,7 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        let resize = if self.ai_resizing { event::listen_with(on_divider_drag) } else { Subscription::none() };
+        let resize = if self.resizing.is_some() { event::listen_with(on_divider_drag) } else { Subscription::none() };
         #[cfg(target_os = "macos")]
         let menu = Subscription::run(crate::menu::events);
         #[cfg(not(target_os = "macos"))]
@@ -2636,7 +3127,17 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates])
+        let stats = if self.live_tab().is_some() {
+            iced::time::every(crate::metrics::POLL_EVERY).map(|_| Message::StatsTick)
+        } else {
+            Subscription::none()
+        };
+        let blocks = if self.tabs.iter().any(|t| t.metas.last().is_some_and(|m| m.took.is_none())) {
+            iced::time::every(BLOCK_TICK).map(|_| Message::BlockTick)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks])
     }
 }
 
@@ -2673,6 +3174,8 @@ fn on_event(ev: Event, _status: event::Status, _window: window::Id) -> Option<Me
             't' => Shortcut::NewLocal,
             'w' => Shortcut::CloseTab,
             'l' => Shortcut::AiPanel,
+            'b' => Shortcut::Sidebar,
+            'j' => Shortcut::StatusBar,
             'o' => Shortcut::Servers,
             'f' => Shortcut::Find,
             ',' => Shortcut::Settings,

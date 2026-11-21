@@ -20,6 +20,9 @@ pub const ATTACH_LINES_MAX: usize = 500;
 pub const AI_PANEL_W_DEFAULT: f32 = 380.0;
 pub const AI_PANEL_W_MIN: f32 = 280.0;
 pub const AI_PANEL_W_MAX: f32 = 720.0;
+pub const SIDEBAR_W_DEFAULT: f32 = 256.0;
+pub const SIDEBAR_W_MIN: f32 = 210.0;
+pub const SIDEBAR_W_MAX: f32 = 380.0;
 const FONT_FAMILY_MAX_CHARS: usize = 64;
 const WINDOW_DEFAULT: (f32, f32) = (1200.0, 760.0);
 const WINDOW_MIN: (f32, f32) = (640.0, 400.0);
@@ -127,6 +130,13 @@ pub struct Settings {
     pub update_check: bool,
     /// Remembered state: dragged with the divider.
     pub ai_panel_width: f32,
+    /// Remembered state: the server sidebar on the left.
+    pub sidebar_open: bool,
+    pub sidebar_width: f32,
+    /// Remembered state: the status bar at the bottom.
+    pub statusbar_open: bool,
+    /// Show commands and their output as blocks (the raw terminal for full-screen programs).
+    pub block_view: bool,
     pub window: WindowSize,
 }
 
@@ -141,10 +151,14 @@ impl Default for Settings {
             scrollback: SCROLLBACK_DEFAULT,
             option_as_meta: true,
             ai_attach_lines: ATTACH_LINES_DEFAULT,
-            ai_panel_open: true,
+            ai_panel_open: false,
             ai_agent: true,
             update_check: true,
             ai_panel_width: AI_PANEL_W_DEFAULT,
+            sidebar_open: true,
+            statusbar_open: true,
+            sidebar_width: SIDEBAR_W_DEFAULT,
+            block_view: true,
             window: WindowSize::default(),
         }
     }
@@ -169,6 +183,7 @@ impl Settings {
         self.scrollback = self.scrollback.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX);
         self.ai_attach_lines = self.ai_attach_lines.clamp(ATTACH_LINES_MIN, ATTACH_LINES_MAX);
         self.ai_panel_width = clamp_or(self.ai_panel_width, AI_PANEL_W_MIN, AI_PANEL_W_MAX, AI_PANEL_W_DEFAULT);
+        self.sidebar_width = clamp_or(self.sidebar_width, SIDEBAR_W_MIN, SIDEBAR_W_MAX, SIDEBAR_W_DEFAULT);
         self.window.width = clamp_or(self.window.width, WINDOW_MIN.0, WINDOW_MAX.0, WINDOW_DEFAULT.0);
         self.window.height = clamp_or(self.window.height, WINDOW_MIN.1, WINDOW_MAX.1, WINDOW_DEFAULT.1);
         self

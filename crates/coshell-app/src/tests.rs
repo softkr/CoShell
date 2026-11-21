@@ -8,10 +8,25 @@ use std::sync::{Arc, Mutex};
 use coshell_ai::{AiError, Format, Profile, ProfileStore, Role, SecretStore, StreamEvent};
 use crate::hosts::{Env, HostDef, HostStore};
 use iced::widget::text_editor;
-use iced_test::simulator;
+
+/// A simulator with the bundled fonts (loaded once for all tests).
+fn simulator<'a>(element: impl Into<iced::Element<'a, Message>>) -> iced_test::Simulator<'a, Message> {
+    load_fonts();
+    iced_test::Simulator::with_settings(iced::Settings { default_font: crate::fonts::SANS, ..Default::default() }, element)
+}
+
+fn load_fonts() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let mut fs = iced::advanced::graphics::text::font_system().write().expect("font system");
+        for f in crate::fonts::FILES {
+            fs.load_font(std::borrow::Cow::Borrowed(f));
+        }
+    });
+}
 use zeroize::Zeroizing;
 
-use crate::ai::{Ai, Attachment, Chat, Turn};
+use crate::ai::{Ai, Attachment, Chat, Exec, ExecState, Turn};
 use crate::app::{CoShell, HostField, Message, Phase};
 use crate::ui;
 
@@ -171,7 +186,8 @@ fn risk_badges_and_labels_render() {
     tab.chat.turns.push(turn(Role::User, "q"));
     tab.chat.turns.push(turn(Role::Assistant, ANSWER));
     let mut ui = simulator(ui::view(&app));
-    ui.find("조회").expect("read-only badge");
+    // Read-only commands get no tag; destructive ones are marked.
+    assert!(ui.find("조회").is_err());
     ui.find("위험").expect("destructive badge");
 }
 
@@ -904,6 +920,8 @@ fn mouse(e: iced::mouse::Event) -> iced::Event {
 
 /// A point inside the terminal grid on every platform's chrome layout.
 const IN_TERMINAL_Y: f32 = 200.0;
+/// Left edge of the terminal: right of the server sidebar and its divider.
+const TERM_LEFT: f32 = crate::settings::SIDEBAR_W_DEFAULT + 4.0;
 
 #[test]
 fn dragging_selects_text_and_typing_clears_it() {
@@ -913,16 +931,19 @@ fn dragging_selects_text_and_typing_clears_it() {
     feed(&app, id, "hello world\r\n".repeat(20).as_bytes());
     {
         let mut ui = simulator(ui::view(&app));
-        ui.point_at((5.0, IN_TERMINAL_Y));
+        ui.point_at((TERM_LEFT + 5.0, IN_TERMINAL_Y));
         let _ = ui.simulate([mouse(M::ButtonPressed(Button::Left))]);
-        ui.point_at((600.0, IN_TERMINAL_Y));
-        let _ = ui.simulate([mouse(M::CursorMoved { position: (600.0, IN_TERMINAL_Y).into() }), mouse(M::ButtonReleased(Button::Left))]);
+        ui.point_at((TERM_LEFT + 340.0, IN_TERMINAL_Y));
+        let _ = ui.simulate([
+            mouse(M::CursorMoved { position: (TERM_LEFT + 340.0, IN_TERMINAL_Y).into() }),
+            mouse(M::ButtonReleased(Button::Left)),
+        ]);
     }
     assert_eq!(selection(&app, id).as_deref(), Some("hello world"));
     {
         // A plain click (no drag) leaves nothing selected.
         let mut ui = simulator(ui::view(&app));
-        ui.point_at((50.0, IN_TERMINAL_Y));
+        ui.point_at((TERM_LEFT + 50.0, IN_TERMINAL_Y));
         let _ = ui.simulate([mouse(M::ButtonPressed(Button::Left)), mouse(M::ButtonReleased(Button::Left))]);
     }
     assert_eq!(selection(&app, id), None);
@@ -936,7 +957,7 @@ fn mouse_aware_programs_get_clicks_and_wheel() {
     // DECSET 1000 (report clicks) + 1006 (SGR encoding), as vim/tmux/htop do.
     feed(&app, id, b"\x1b[?1000h\x1b[?1006h");
     let mut ui = simulator(ui::view(&app));
-    ui.point_at((50.0, IN_TERMINAL_Y));
+    ui.point_at((TERM_LEFT + 50.0, IN_TERMINAL_Y));
     let _ = ui.simulate([
         mouse(M::ButtonPressed(Button::Left)),
         mouse(M::ButtonReleased(Button::Left)),
@@ -1015,7 +1036,7 @@ fn notices_are_toasts_and_unsafe_links_are_refused() {
 
 #[test]
 fn ai_panel_width_follows_the_divider_within_limits() {
-    use crate::settings::{AI_PANEL_W_MAX, AI_PANEL_W_MIN};
+    use crate::settings::AI_PANEL_W_MIN;
     let mut app = app();
     let _ = app.update(Message::WindowResized(iced::Size::new(1200.0, 760.0)));
     let _ = app.update(Message::AiResizeStart);
@@ -1024,12 +1045,84 @@ fn ai_panel_width_follows_the_divider_within_limits() {
     let _ = app.update(Message::AiResizeTo(1190.0));
     assert_eq!(app.settings.ai_panel_width, AI_PANEL_W_MIN);
     let _ = app.update(Message::AiResizeTo(0.0));
-    assert_eq!(app.settings.ai_panel_width, AI_PANEL_W_MAX);
-    // A narrow window keeps room for the terminal.
+    // 1200 − sidebar 256 − terminal minimum 320; below AI_PANEL_W_MAX.
+    assert_eq!(app.settings.ai_panel_width, 624.0);
+    // A narrow window keeps room for the terminal (and the server sidebar).
     let _ = app.update(Message::WindowResized(iced::Size::new(800.0, 600.0)));
+    let _ = app.update(Message::AiResizeTo(0.0));
+    assert_eq!(app.settings.ai_panel_width, AI_PANEL_W_MIN);
+    let _ = app.update(Message::SidebarToggle);
     let _ = app.update(Message::AiResizeTo(0.0));
     assert_eq!(app.settings.ai_panel_width, 480.0);
     let _ = app.update(Message::AiResizeEnd);
+}
+
+#[test]
+fn sidebar_width_follows_its_divider_within_limits() {
+    use crate::settings::{SIDEBAR_W_MAX, SIDEBAR_W_MIN};
+    let mut app = app();
+    let _ = app.update(Message::WindowResized(iced::Size::new(1400.0, 800.0)));
+    let _ = app.update(Message::SidebarResizeStart);
+    let _ = app.update(Message::AiResizeTo(300.0));
+    assert_eq!(app.settings.sidebar_width, 300.0);
+    let _ = app.update(Message::AiResizeTo(10.0));
+    assert_eq!(app.settings.sidebar_width, SIDEBAR_W_MIN);
+    let _ = app.update(Message::AiResizeTo(900.0));
+    assert_eq!(app.settings.sidebar_width, SIDEBAR_W_MAX);
+    let _ = app.update(Message::AiResizeEnd);
+    // Moving the mouse after release changes nothing.
+    let _ = app.update(Message::AiResizeTo(250.0));
+    assert_eq!(app.settings.sidebar_width, SIDEBAR_W_MAX);
+}
+
+#[test]
+fn sidebar_lists_servers_and_snippets_type_into_the_terminal() {
+    let mut store = HostStore::default();
+    store.upsert(None, HostDef { alias: "web".into(), name: Some("web-01".into()), hostname: Some("10.0.0.1".into()), group: Some("서비스".into()), env: Env::Prod, ..HostDef::default() });
+    let mut app = app_with("", store, None, ai_with("ollama", &[]));
+    let id = app.open_local();
+    let mut ui = simulator(ui::view(&app));
+    ui.find("운영").expect("environment group header");
+    ui.click("web-01").expect("server row");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::HostConnect(a) if a == "web")), "{msgs:?}");
+
+    // Folding a group hides its servers.
+    let _ = app.update(Message::GroupToggle("운영".into()));
+    assert!(simulator(ui::view(&app)).find("web-01").is_err());
+
+    // Snippets: 입력 types without Enter, 실행 adds Enter.
+    let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Snippets));
+    let mut ui = simulator(ui::view(&app));
+    ui.find(">_ df -h").expect("snippet command");
+    drop(ui);
+    let _ = app.update(Message::Snippet(0, false));
+    let _ = app.update(Message::TermInsert("uptime".into()));
+    assert!(app.notice.is_none(), "typed into the live terminal: {:?}", app.notice);
+    assert!(app.tabs.iter().any(|t| t.id == id));
+}
+
+#[test]
+fn production_lock_controls_the_second_click_for_changes() {
+    let mut app = app();
+    let id = app.open_local();
+    simulator(ui::view(&app)).find("운영 안전 잠금 ON").expect_err("no lock outside production");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().env = Env::Prod;
+    let cmd = "sudo systemctl restart nginx".to_string();
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().chat.turns.push(turn(Role::Assistant, "m"));
+    let _ = app.update(Message::AiRun(id, 0, cmd.clone()));
+    assert_eq!(app.tabs.iter().find(|t| t.id == id).unwrap().chat.run_confirm.as_deref(), Some(cmd.as_str()), "lock on: asks first");
+    let _ = app.update(Message::AiRunCancel(id));
+    assert!(app.tabs.iter().find(|t| t.id == id).unwrap().chat.run_confirm.is_none());
+
+    simulator(ui::view(&app)).find("운영 안전 잠금 ON").expect("lock shows on a production tab");
+    let _ = app.update(Message::ProdGuard);
+    assert!(!app.prod_guard);
+    let _ = app.update(Message::AiRun(id, 0, cmd.clone()));
+    assert!(app.tabs.iter().find(|t| t.id == id).unwrap().chat.run_confirm.is_none(), "lock off: runs at once");
+    // Destructive commands still ask, lock or not.
+    let _ = app.update(Message::AiRun(id, 0, "rm -rf /tmp/x".into()));
+    assert_eq!(app.tabs.iter().find(|t| t.id == id).unwrap().chat.run_confirm.as_deref(), Some("rm -rf /tmp/x"));
 }
 
 #[test]
@@ -1319,7 +1412,7 @@ fn agent_runs_a_read_only_command_reads_it_and_carries_on() {
 
     // The chat shows one compact line for the command, never the hidden turn; output opens on click.
     let mut ui = simulator(ui::view(&app));
-    ui.find("실행함 · 3줄").expect("compact command line");
+    ui.find("실행 완료").expect("compact command line");
     assert!(ui.find("<command_result").is_err());
     drop(ui);
     let _ = app.update(Message::AgentToggle(id, 1, 0));
@@ -1779,4 +1872,119 @@ fn composing_syllable_is_kept_when_the_caret_moves_away() {
         }
         assert_eq!(draft(&app), "한국어", "{what}");
     }
+}
+
+/// The design's sample screen (coshell_ai_native_ssh_terminal.html) rebuilt with the real app:
+/// production server app-01 with two command blocks, live figures and the disk conversation.
+#[test]
+fn design_sample_screen() {
+    use crate::blocks::{Meta, Sig, Source};
+    let mut store = HostStore::default();
+    for (alias, ip, user, env) in [("app-01", "192.168.10.42", "ops", Env::Prod), ("db-01", "192.168.10.48", "dba", Env::Prod), ("dev-01", "10.0.4.15", "dev", Env::Dev)] {
+        store.upsert(None, HostDef { alias: alias.into(), hostname: Some(ip.into()), user: Some(user.into()), env, ..HostDef::default() });
+    }
+    let mut app = app_with("", store, None, ai_with("ollama", &[]));
+    let _ = app.update(Message::WindowResized(iced::Size::new(1440.0, 900.0)));
+    app.settings.ai_panel_width = 370.0;
+    let id = app.open_local();
+    let dev = app.open_local();
+    let _ = app.update(Message::Activate(id));
+    // Let the real shell print its prompt, then replace the screen with the sample.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    for (tid, name, env, route) in [(id, "app-01", Env::Prod, "ops@192.168.10.42"), (dev, "dev-01", Env::Dev, "dev@10.0.4.15")] {
+        app.mark_remote(tid);
+        let t = app.tabs.iter_mut().find(|t| t.id == tid).unwrap();
+        t.name = name.into();
+        t.custom_name = Some(name.into());
+        t.env = env;
+        t.alias = Some(name.into());
+        t.route = vec![route.into()];
+    }
+    feed(
+        &app,
+        id,
+        b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ df -h /var\r\nFilesystem      Size  Used Avail Use% Mounted on\r\n/dev/sda2        80G   73G  7.0G  91% /var\r\nops@app-01:~$ du -h -d 1 /var/log\r\n56G     /var/log/nginx\r\n12G     /var/log/app\r\n3.4G    /var/log/audit\r\n1.2G    /var/log/journal\r\n72G     /var/log\r\nops@app-01:~$ ",
+    );
+    {
+        let t = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+        t.sig = Some(Sig::UserHost("ops@app-01".into()));
+        let meta = |cmd: &str, source, time: &str, ms| Meta { time: time.into(), took: Some(std::time::Duration::from_millis(ms)), exit: Some(0), ..Meta::new(cmd, source) };
+        t.metas = vec![meta("df -h /var", Source::User, "06:34:12", 18), meta("du -h -d 1 /var/log", Source::Ai, "06:34:19", 142)];
+        t.stats = Some(crate::metrics::Stats { cpu: 34, mem: 62, disk: 91, disk_mount: "/var".into(), os: Some("Ubuntu 22.04 LTS".into()), latency_ms: Some(22) });
+        t.chat.turns.push(turn(Role::User, "디스크 사용량이 높은 이유를 확인해줘."));
+        t.chat.turns.push(Turn {
+            execs: vec![Exec {
+                cmd: "du -h -d 1 /var/log".into(),
+                state: ExecState::Done { output: "56G /var/log/nginx\n12G /var/log/app".into(), exit: Some(0), secrets: 0 },
+                sent: true,
+                open: false,
+                manual: false,
+            }],
+            ..turn(
+                Role::Assistant,
+                "`/var` 사용량이 **91%**예요. 로그 디렉터리별 용량을 확인했어요. `/var/log/nginx`가 **56G**로 대부분을 차지하고 있습니다.\n\n```bash\ndu -h -d 1 /var/log\n```\n\n```bash\n# 가장 큰 Nginx 로그 파일 5개 확인\nls -lhS /var/log/nginx | head -n 5\n```",
+            )
+        });
+    }
+    load_fonts();
+    let settings = iced::Settings { default_font: crate::fonts::SANS, ..Default::default() };
+    let mut ui = iced_test::Simulator::with_size(settings, (1440.0, 900.0), ui::view(&app));
+    for t in ["사용자", "ops@app-01", "df -h /var", "06:34:12", "app-01 리소스", "SSH 연결됨", "지연시간: ", "22ms", "Ubuntu 22.04 LTS", "운영 안전 잠금 ON", "Cluster: "] {
+        ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
+    }
+    if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+        let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("design-sample"));
+    }
+}
+
+
+#[test]
+fn layout_buttons_hide_and_show_panels() {
+    let mut app = app();
+    app.open_local();
+    assert!(app.settings.sidebar_open && app.ai.open && app.settings.statusbar_open);
+    let _ = app.update(Message::SidebarToggle);
+    let _ = app.update(Message::AiToggle);
+    assert!(!app.settings.sidebar_open && !app.ai.open);
+    let mut ui = simulator(ui::view(&app));
+    ui.find("세션 없음").expect_err("a session is open");
+    ui.find("AI 채팅").expect_err("AI panel hidden");
+    drop(ui);
+    let _ = app.update(Message::SidebarToggle);
+    let _ = app.update(Message::AiToggle);
+    assert!(app.settings.sidebar_open && app.ai.open);
+    // The status bar has no header button but still toggles from ⌘J and the menu.
+    let _ = app.update(Message::StatusBarToggle);
+    assert!(!app.settings.statusbar_open);
+    simulator(ui::view(&app)).find("xterm-256color").expect_err("status bar hidden");
+    let _ = app.update(Message::StatusBarToggle);
+    simulator(ui::view(&app)).find("xterm-256color").expect("status bar back");
+}
+
+#[test]
+fn hash_at_an_empty_prompt_asks_in_an_app_field() {
+    use crate::blocks::Sig;
+    let mut app = app();
+    let id = app.open_local();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    feed(&app, id, b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ ");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().sig = Some(Sig::UserHost("ops@app-01".into()));
+    assert!(app.screen_of(app.tabs.iter().find(|t| t.id == id).unwrap()).is_some_and(|s| s.current.is_some()));
+
+    let _ = app.update(Message::Input(id, b"#".to_vec()));
+    assert_eq!(app.ask, Some((id, "#".to_string())), "# opens the question field instead of reaching the shell");
+    let _ = app.update(Message::AskInput("#디스크 사용량".into()));
+    simulator(ui::view(&app)).find("Enter 질문 · Esc 취소").expect("question hint shows");
+    let _ = app.update(Message::AskSubmit);
+    assert!(app.ask.is_none());
+    assert!(app.ai.open);
+    assert_eq!(app.notice.as_deref(), Some("터미널에서 AI에게 질문을 전달했습니다"));
+
+    // Deleting the # goes back to the shell; Esc too.
+    let _ = app.update(Message::Input(id, b"#".to_vec()));
+    let _ = app.update(Message::AskInput(String::new()));
+    assert!(app.ask.is_none());
+    let _ = app.update(Message::Input(id, b"#".to_vec()));
+    let _ = app.update(Message::AskCancel);
+    assert!(app.ask.is_none());
 }
