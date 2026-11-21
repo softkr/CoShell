@@ -187,7 +187,9 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
     } else if typed.is_empty() {
         line = line.push(caret()).push(mono(tr("명령어 입력 (Tab 자동완성 · '#'으로 바로 AI 질문)..."), TEXT, theme::TEXT_3));
     } else {
-        line = line.push(mono(before, TEXT, theme::SLATE_100)).push(caret()).push(mono(after, TEXT, theme::SLATE_100));
+        // No wrapping, so a trailing space keeps its width and moves the caret.
+        let typed_text = |s: String| -> El<'a> { text(s).size(TEXT).font(MONO).color(theme::SLATE_100).wrapping(text::Wrapping::None).into() };
+        line = line.push(typed_text(before)).push(caret()).push(typed_text(after));
         if let Some(g) = &ghost {
             line = line.push(mono(g.clone(), TEXT, theme::SLATE_600));
         }

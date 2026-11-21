@@ -1255,7 +1255,16 @@ impl CoShell {
             return None;
         }
         let sig = tab.sig.as_ref()?;
-        Some(crate::blocks::parse(&coshell_term::logical_lines(s.term(), crate::blocks::BLOCK_ROWS), sig))
+        let mut screen = crate::blocks::parse(&coshell_term::logical_lines(s.term(), crate::blocks::BLOCK_ROWS), sig);
+        // Spaces typed at the end ("sudo ") are cut off with the line's trailing blanks;
+        // the cursor still sits after them. (At an empty prompt they can't be told from
+        // the prompt's own space.)
+        if let Some((_, typed)) = screen.current.as_mut()
+            && !typed.is_empty()
+        {
+            typed.extend(std::iter::repeat_n(' ', crate::blocks::cursor_gap(s.term())));
+        }
+        Some(screen)
     }
 
     /// Keys for the shell. In block view, Enter on `# question` asks the AI instead, Enter

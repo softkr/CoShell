@@ -117,6 +117,23 @@ pub fn cursor_tail(term: &SharedTerm) -> usize {
     tail.trim_end().chars().count()
 }
 
+/// Blank cells right before the cursor when nothing follows it on its row: spaces typed at
+/// the end of the command. Lines read off the screen lose them (a trailing space and an
+/// empty cell look the same), so only the cursor tells them apart.
+pub fn cursor_gap(term: &SharedTerm) -> usize {
+    use coshell_term::alacritty_terminal::grid::Dimensions;
+    use coshell_term::alacritty_terminal::index::Column;
+    let term = term.lock();
+    let grid = term.grid();
+    let cursor = grid.cursor.point;
+    let row = &grid[cursor.line];
+    let blank = |c: usize| row[Column(c)].c == ' ';
+    if !(cursor.column.0..grid.columns()).all(blank) {
+        return 0;
+    }
+    (0..cursor.column.0).rev().take_while(|&c| blank(c)).count()
+}
+
 /// A full-screen program (vim, top, less) owns the screen: show the raw terminal.
 pub fn alt_screen(term: &SharedTerm) -> bool {
     term.lock().mode().contains(TermMode::ALT_SCREEN)

@@ -1988,3 +1988,22 @@ fn hash_at_an_empty_prompt_asks_in_an_app_field() {
     let _ = app.update(Message::AskCancel);
     assert!(app.ask.is_none());
 }
+
+#[test]
+fn trailing_space_at_the_prompt_is_kept() {
+    use crate::blocks::Sig;
+    let mut app = app();
+    let id = app.open_local();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    feed(&app, id, b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ sudo ");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().sig = Some(Sig::UserHost("ops@app-01".into()));
+    let typed = |app: &CoShell| app.screen_of(app.tabs.iter().find(|t| t.id == id).unwrap()).and_then(|s| s.current).map(|(_, t)| t);
+    assert_eq!(typed(&app).as_deref(), Some("sudo "), "the space before the cursor is part of what is typed");
+    // The suggestion continues after the space instead of adding a second one.
+    let metas = [crate::blocks::Meta::new("sudo apt upgrade", crate::blocks::Source::User)];
+    assert_eq!(crate::blocks::ghost("sudo ", &metas).as_deref(), Some("apt upgrade"));
+
+    // With the cursor moved back into the word, nothing is added.
+    feed(&app, id, b"\x1b[3D");
+    assert_eq!(typed(&app).as_deref(), Some("sudo"));
+}
