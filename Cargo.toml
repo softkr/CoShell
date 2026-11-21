@@ -20,3 +20,9 @@ zeroize = "1"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# winit 0.30.13 plus one fix: the first key after switching to Apple's Korean input method
+# composes instead of arriving as a bare jamo (vendor/winit/COSHELL_PATCH.md). Drop this once
+# a winit release carries rust-windowing/winit#4744.
+[patch.crates-io]
+winit = { path = "vendor/winit" }
