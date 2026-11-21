@@ -252,7 +252,10 @@ pub(crate) fn muted<'a>(s: impl Into<String>) -> El<'a> {
 /// Draggable divider between panes: a 1px border on the terminal's side of a wider grab strip.
 fn divider<'a>(on_press: Message, line_right: bool, color: Color) -> El<'a> {
     let strip = container(Space::new()).width(DIVIDER_W - 1.0).height(Length::Fill).style(fill(color));
-    let content: El<'a> = if line_right { row![strip, rule(false)].into() } else { row![rule(false), strip].into() };
+    // The hairline is translucent: give it an opaque base, or beside the see-through
+    // sidebar it shows the desktop behind the window (a bright white line over a light one).
+    let line = || container(rule(false)).height(Length::Fill).style(fill(theme::BG_0));
+    let content: El<'a> = if line_right { row![strip, line()].into() } else { row![line(), strip].into() };
     mouse_area(content).on_press(on_press).interaction(iced::mouse::Interaction::ResizingHorizontally).into()
 }
 

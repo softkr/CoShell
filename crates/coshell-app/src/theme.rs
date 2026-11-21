@@ -58,7 +58,9 @@ pub const ENV_STAGE: Color = TEAL;
 pub const ENV_DEV: Color = GREEN;
 /// The sidebar: on macOS a tint over the blurred desktop behind the window (the window is
 /// transparent there, see `main.rs`); a plain panel elsewhere.
-pub const SIDEBAR: Color = if cfg!(target_os = "macos") { alpha(hex(0x18181B), 0.74) } else { hex(0x151518) };
+/// Dense enough that a bright window or wallpaper behind it still leaves a dark panel:
+/// over white it comes out near #2B2B2D, so tertiary labels stay legible.
+pub const SIDEBAR: Color = if cfg!(target_os = "macos") { alpha(hex(0x18181B), 0.92) } else { hex(0x151518) };
 pub const SCRIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 };
 
 /// `c` at `alpha` opacity.
