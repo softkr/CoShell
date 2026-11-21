@@ -119,6 +119,17 @@ impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
             shell.capture_event(); // the system committing what we already inserted
             return;
         }
+        // The system ended or replaced the composition itself. Fields only report it on the next redraw,
+        // and macOS sends the Enter that committed "응" right behind the commit: left stale, the Enter
+        // would commit the syllable a second time.
+        match event {
+            Event::InputMethod(input_method::Event::Commit(_) | input_method::Event::Closed) => state.composing = None,
+            Event::InputMethod(input_method::Event::Preedit(content, _)) => match &mut state.composing {
+                Some((text, ..)) if !content.is_empty() => text.clone_from(content),
+                _ => state.composing = None,
+            },
+            _ => {}
+        }
         if ends_composition(event)
             && let Some((text, ..)) = state.composing.take()
         {

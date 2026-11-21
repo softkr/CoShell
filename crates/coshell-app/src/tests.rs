@@ -1874,6 +1874,33 @@ fn composing_syllable_is_kept_when_the_caret_moves_away() {
     }
 }
 
+#[test]
+fn enter_sends_the_composing_syllable_once() {
+    use iced::advanced::input_method::Event as Ime;
+    use iced::keyboard::key::Named;
+    let mut app = app();
+    let id = quiet_tab(&mut app);
+    let mut ui = simulator(ui::view(&app));
+    ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+    // macOS on Enter while "응" is composing: it commits the syllable, then delivers the Enter, in one go.
+    let _ = ui.simulate([
+        iced::Event::InputMethod(Ime::Opened),
+        iced::Event::InputMethod(Ime::Preedit("응".into(), None)),
+        iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())),
+        iced::Event::InputMethod(Ime::Preedit(String::new(), None)),
+        iced::Event::InputMethod(Ime::Commit("응".into())),
+        iced_test::simulator::press_key(Named::Enter, None),
+    ]);
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    for m in msgs {
+        let _ = app.update(m);
+    }
+    let chat = &app.tabs.iter().find(|t| t.id == id).unwrap().chat;
+    let sent: Vec<&str> = chat.turns.iter().filter(|t| t.role == Role::User).map(|t| t.text.as_str()).collect();
+    assert_eq!(sent, ["응"]);
+    assert!(chat.draft.text().trim().is_empty(), "{:?}", chat.draft.text());
+}
+
 /// The design's sample screen (coshell_ai_native_ssh_terminal.html) rebuilt with the real app:
 /// production server app-01 with two command blocks, live figures and the disk conversation.
 #[test]
