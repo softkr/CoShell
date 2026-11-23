@@ -134,6 +134,12 @@ pub fn cursor_gap(term: &SharedTerm) -> usize {
     (0..cursor.column.0).rev().take_while(|&c| blank(c)).count()
 }
 
+/// The program asks for a password or passphrase on this line: what is typed is hidden.
+pub fn asks_secret(line: &str) -> bool {
+    let l = line.trim_end().to_lowercase();
+    l.ends_with(':') && ["password", "passphrase", "비밀번호", "암호"].iter().any(|w| l.contains(w))
+}
+
 /// A full-screen program (vim, top, less) owns the screen: show the raw terminal.
 pub fn alt_screen(term: &SharedTerm) -> bool {
     term.lock().mode().contains(TermMode::ALT_SCREEN)
@@ -357,8 +363,22 @@ mod tests {
         assert_eq!(sig_of("ops@app-01:~$ "), Some(Sig::UserHost("ops@app-01".into())));
         assert_eq!(sig_of("ops@app-01:~$ typing"), None);
         assert_eq!(sig_of("some output"), None);
+        // Progress output is not a zsh `%` prompt (apt, wget …); a tcsh `host1%` still is.
+        assert_eq!(sig_of("Reading package lists... 61%"), None);
+        assert_eq!(sig_of("100%"), None);
+        assert_eq!(sig_of("Downloading (12.5%"), None);
+        assert_eq!(sig_of("web01%"), Some(Sig::Raw("web01%".into())));
         let s = parse(&lines("❯ git status\nclean\n❯"), &Sig::Raw("❯".into()));
         assert_eq!(s.blocks[0].cmd, "git status");
+    }
+
+    #[test]
+    fn password_prompts_are_recognised() {
+        assert!(asks_secret("[sudo] password for ops:"));
+        assert!(asks_secret("Enter passphrase for key '/home/ops/.ssh/id_ed25519': "));
+        assert!(asks_secret("비밀번호:"));
+        assert!(!asks_secret("Do you want to continue? [Y/n]"));
+        assert!(!asks_secret("password updated successfully"));
     }
 
     #[test]

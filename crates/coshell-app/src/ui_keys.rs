@@ -1,6 +1,6 @@
 //! SSH keys: the settings page, the import dialog and the server editor's key picker.
 
-use iced::widget::{Space, column, container, pick_list, row, scrollable, text, text_editor, text_input};
+use iced::widget::{Space, column, container, pick_list, row, text, text_editor, text_input};
 use iced::{Alignment, Background, Border, Length, Padding};
 
 use crate::app::{CoShell, HostField, KeyImport, Message};
@@ -93,7 +93,7 @@ pub fn page(app: &CoShell) -> El<'_> {
         .into()
     } else {
         let cards: Vec<El<'_>> = app.keys.iter().map(|k| key_card(app, k)).collect();
-        scrollable(container(row(cards).spacing(12).wrap().vertical_spacing(12)).padding(Padding::ZERO.right(12.0)))
+        crate::ui::scroll(container(row(cards).spacing(12).wrap().vertical_spacing(12)).padding(Padding::ZERO.right(12.0)))
             .height(Length::Fill)
             .into()
     };
@@ -191,7 +191,7 @@ pub fn import_dialog(k: &KeyImport, composing: bool) -> El<'_> {
         ]
         .spacing(8),
     );
-    container(scrollable(col)).padding(20).width(IMPORT_W).style(card_style(theme::LINE_2)).into()
+    container(crate::ui::scroll(col)).padding(20).width(IMPORT_W).style(card_style(theme::LINE_2)).into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

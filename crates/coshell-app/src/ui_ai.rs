@@ -232,7 +232,7 @@ fn conversation(tab: &Tab, guard: bool, face: Face, fold: f32) -> El<'_> {
     if let Some(e) = &chat.error {
         col = col.push(error_card(tab.id, e));
     }
-    scrollable(col).anchor_bottom().height(Length::Fill).into()
+    crate::ui::scroll(col).anchor_bottom().height(Length::Fill).into()
 }
 
 /// A reply's status mark, and whether a line joins it to the reply before / after it.
@@ -566,7 +566,7 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a>
             ExecState::Running | ExecState::Typed => String::new(),
         };
         col = col.push(
-            container(scrollable(container(mono(body, 11.0, theme::SLATE_300)).padding(10)).height(Length::Shrink))
+            container(crate::ui::scroll(container(mono(body, 11.0, theme::SLATE_300)).padding(10)).height(Length::Shrink))
                 .max_height(EXEC_OUTPUT_MAX_H)
                 .width(Length::Fill)
                 .style(cmd_card_style(theme::LINE)),
@@ -1126,8 +1126,8 @@ pub fn settings_page(s: &Settings) -> El<'_> {
     column![
         row![crate::icons::icon(&crate::icons::API_BRIDGE, 16.0), text(tr("AI 연결 설정")).size(13)].spacing(8).align_y(Alignment::Center),
         row![
-            container(scrollable(list)).width(190).height(Length::Fill),
-            column![container(scrollable(container(form).padding(Padding::ZERO.right(12.0)))).height(Length::Fill), actions].spacing(8).width(Length::Fill),
+            container(crate::ui::scroll(list)).width(190).height(Length::Fill),
+            column![container(crate::ui::scroll(container(form).padding(Padding::ZERO.right(12.0)))).height(Length::Fill), actions].spacing(8).width(Length::Fill),
         ]
         .spacing(18)
         .height(Length::Fill),

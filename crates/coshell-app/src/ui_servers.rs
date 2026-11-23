@@ -2,7 +2,7 @@
 
 use crate::i18n::{tf, tr};
 use coshell_ssh::DEFAULT_PORT;
-use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{Space, button, column, container, row, text, text_input};
 use iced::{Alignment, Background, Border, Font, Length, Padding};
 
 use crate::app::{CoShell, Message};
@@ -158,7 +158,7 @@ pub fn page(app: &CoShell) -> El<'_> {
         let grid = row(list.into_iter().map(card).collect::<Vec<_>>()).spacing(14).wrap().vertical_spacing(14);
         col = col.push(column![head, grid].spacing(10));
     }
-    container(scrollable(container(col).padding(Padding { top: 20.0, right: 24.0, bottom: 28.0, left: 24.0 })))
+    container(crate::ui::scroll(container(col).padding(Padding { top: 20.0, right: 24.0, bottom: 28.0, left: 24.0 })))
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_| container::Style { background: Some(Background::Color(theme::BG_0)), ..Default::default() })
@@ -218,5 +218,5 @@ pub fn manage(app: &CoShell) -> El<'_> {
         }
         list = list.push(rows);
     }
-    column![header, scrollable(container(list).padding(Padding::ZERO.right(12.0))).height(Length::Fill)].spacing(12).height(Length::Fill).into()
+    column![header, crate::ui::scroll(container(list).padding(Padding::ZERO.right(12.0))).height(Length::Fill)].spacing(12).height(Length::Fill).into()
 }

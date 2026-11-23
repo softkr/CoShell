@@ -31,7 +31,6 @@ pub struct Turn {
     /// What was sent to the model (question + framed attachment).
     pub sent: String,
     pub attachment: Option<String>,
-    pub model: String,
     pub stopped: bool,
     /// Commands from this reply that were run (by the assistant or with ▶) and what came back.
     pub execs: Vec<Exec>,
@@ -278,7 +277,6 @@ impl Ai {
             text: question,
             sent,
             attachment: attachment.map(|a| a.label),
-            model: String::new(),
             stopped: false,
             execs: Vec::new(),
             hidden: false,
@@ -308,7 +306,6 @@ impl Ai {
             text: String::new(),
             sent: String::new(),
             attachment: None,
-            model: profile.model.clone(),
             stopped: false,
             execs: Vec::new(),
             hidden: false,

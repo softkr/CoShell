@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::app::{CONFIRM_INPUT, CoShell, PALETTE_INPUT, Pending, Phase, RENAME_INPUT, SEARCH_INPUT, Search, Step, Tab, prompt_input_id};
 use crate::app::{Message, PaletteItem};
-use crate::icons::{DOWNLOAD, LOCK, LOCK_OPEN, SEARCH, TRASH, X};
+use crate::icons::{LOCK, LOCK_OPEN, SEARCH, TRASH, X};
 use crate::terminal::TerminalView;
 use crate::hosts::Env;
 use crate::theme::{self, alpha};
@@ -49,6 +49,9 @@ pub(crate) const R_CARD: f32 = 12.0;
 pub(crate) const R_DIALOG: f32 = 16.0;
 /// Tabs, sidebar rows, search fields.
 pub(crate) const R_ROW: f32 = 9.0;
+/// Vertical scrollbars: thin, neutral and trackless (iced's default is 10px with an indigo thumb).
+const SCROLLBAR_W: f32 = 6.0;
+const SCROLLBAR_MARGIN: f32 = 2.0;
 pub(crate) const R_PILL: f32 = 999.0;
 
 pub(crate) const MEDIUM: Font = Font { weight: iced::font::Weight::Medium, ..crate::fonts::SANS };
@@ -128,6 +131,28 @@ pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: impl text::IntoFragment
         ..Default::default()
     });
     tooltip(content, bubble, pos).gap(4).into()
+}
+
+/// A vertically scrolling area with the app's thin scrollbar.
+pub(crate) fn scroll<'a>(content: impl Into<El<'a>>) -> scrollable::Scrollable<'a, Message> {
+    let bar = scrollable::Scrollbar::new().width(SCROLLBAR_W).scroller_width(SCROLLBAR_W).margin(SCROLLBAR_MARGIN);
+    scrollable(content).direction(scrollable::Direction::Vertical(bar)).style(scroll_style)
+}
+
+fn scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let hot = matches!(
+        status,
+        scrollable::Status::Hovered { is_vertical_scrollbar_hovered: true, .. } | scrollable::Status::Dragged { is_vertical_scrollbar_dragged: true, .. }
+    );
+    let rail = scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: Background::Color(alpha(Color::WHITE, if hot { 0.35 } else { 0.18 })),
+            border: Border { radius: R_PILL.into(), ..Default::default() },
+        },
+    };
+    scrollable::Style { vertical_rail: rail, horizontal_rail: rail, ..scrollable::default(theme, status) }
 }
 
 pub(crate) fn card_style(border_color: Color) -> impl Fn(&Theme) -> container::Style {
@@ -347,6 +372,9 @@ pub fn view(app: &CoShell) -> El<'_> {
     }
     if let Some(tab) = app.close_confirm.and_then(|id| app.tabs.iter().find(|t| t.id == id)) {
         layers.push(modal(close_dialog(tab)));
+    }
+    if let Some(alias) = &app.delete_confirm {
+        layers.push(modal(delete_dialog(app, alias)));
     }
     if app.palette.is_some() {
         layers.push(palette(app));
@@ -576,11 +604,13 @@ fn tab_group(t: &Tab) -> Option<&'static str> {
     }
 }
 
-/// Dot and top edge colour of a tab: production amber, everything else emerald (red once it is down).
-fn tab_color(t: &Tab) -> Color {
+/// Dot colour of a tab, by session state: connected green, running a command amber,
+/// disconnected red (grey while still connecting).
+pub(crate) fn tab_color(t: &Tab) -> Color {
     match (&t.phase, t.exited) {
         (Phase::Failed(_), _) | (Phase::Live(_), true) => theme::ERR_TX,
-        _ if t.env == Env::Prod => theme::WARN,
+        (Phase::Connecting, _) => theme::TEXT_3,
+        _ if t.metas.last().is_some_and(|m| m.took.is_none()) => theme::WARN,
         _ => theme::OK,
     }
 }
@@ -701,7 +731,6 @@ fn tab_bar(app: &CoShell) -> El<'_> {
     let tools = row![
         tip(diagnose, tr("현재 서버 AI 자동 진단"), tooltip::Position::Bottom),
         tool(&SEARCH, tr("터미널 출력 검색 (⌘F)"), Message::Shortcut(crate::app::Shortcut::Find)),
-        tool(&DOWNLOAD, tr("세션 로그 내보내기 (.md)"), Message::ExportSession),
         tool(&TRASH, tr("터미널 화면 지우기 (clear)"), Message::TermClear),
     ]
     .spacing(4)
@@ -768,8 +797,6 @@ fn status_bar(app: &CoShell) -> El<'_> {
                 right.push(sep());
             }
             right.push(small("UTF-8".into(), theme::TEXT_2));
-            right.push(sep());
-            right.push(small("xterm-256color".into(), theme::TEXT_2));
             if let Some(os) = t.stats.as_ref().and_then(|s| s.os.clone()) {
                 right.push(sep());
                 right.push(small(os, theme::SLATE_300));
@@ -920,6 +947,23 @@ fn close_dialog(tab: &Tab) -> El<'_> {
         .spacing(8),
     );
     container(col).padding(18).width(MODAL_W - 80.0).style(card_style(env_color(tab.env).map_or(theme::LINE_2, |c| alpha(c, 0.6)))).into()
+}
+
+/// "Delete this server?", asked from the sidebar's right-click menu.
+fn delete_dialog<'a>(app: &CoShell, alias: &'a str) -> El<'a> {
+    let col = column![
+        text(tf("{0} 서버를 삭제할까요?", &[&app.display_of(alias)])).size(14),
+        muted(tr("저장된 접속 정보가 지워지며 되돌릴 수 없습니다.")),
+        Space::new().height(8),
+        row![
+            Space::new().width(Length::Fill),
+            btn(tr("취소"), Btn::Ghost, Some(Message::HostDeleteCancel)),
+            btn(tr("삭제"), Btn::Danger, Some(Message::HostDeleteConfirmed(alias.to_string()))),
+        ]
+        .spacing(8),
+    ]
+    .spacing(6);
+    container(col).padding(18).width(MODAL_W - 80.0).style(card_style(env_color(app.env_of(alias)).map_or(theme::LINE_2, |c| alpha(c, 0.6)))).into()
 }
 
 pub(crate) fn dark<'a>(content: impl Into<El<'a>>) -> El<'a> {
@@ -1149,7 +1193,7 @@ fn palette(app: &CoShell) -> El<'_> {
     let list: El<'_> = if rows.is_empty() {
         container(text(tr("검색 결과가 없습니다.")).size(12).color(theme::TEXT_3)).center_x(Length::Fill).padding([24, 0]).into()
     } else {
-        scrollable(column(rows).spacing(4).padding(8)).height(Length::Shrink).into()
+        scroll(column(rows).spacing(4).padding(8)).height(Length::Shrink).into()
     };
     let card = container(
         column![

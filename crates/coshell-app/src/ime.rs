@@ -8,7 +8,8 @@
 //!
 //! It also commits the composing text when the caret leaves it (click, arrow
 //! keys, Tab, Enter, Esc, window losing focus): iced would otherwise drop the
-//! last, still-composing syllable.
+//! last, still-composing syllable. The system input method is then made to
+//! drop its copy, or it would type the syllable again in the next field.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
@@ -54,6 +55,8 @@ struct State {
     composing: Option<(String, Rectangle, Option<Pixels>)>,
     /// What we committed on the user's behalf, and when.
     committed: Option<(String, std::time::Instant)>,
+    /// The system still holds what we committed as its own composition: let go of it on the next frame.
+    release: bool,
 }
 
 /// Moves the caret or the focus away from the composing text.
@@ -146,7 +149,9 @@ impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
                 shell.publish(m);
             }
             shell.request_redraw();
-            tree.state.downcast_mut::<State>().committed = Some((text, std::time::Instant::now()));
+            let state = tree.state.downcast_mut::<State>();
+            state.committed = Some((text, std::time::Instant::now()));
+            state.release = true;
         }
         self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
         let state = tree.state.downcast_mut::<State>();
@@ -157,6 +162,14 @@ impl<Message> Widget<Message, Theme, Renderer> for Ime<'_, Message> {
             }
             InputMethod::Disabled if matches!(event, Event::Window(window::Event::RedrawRequested(_))) => state.composing = None,
             InputMethod::Disabled => {}
+        }
+        // macOS was never told the syllable is done: it would type it again on the next key, into whatever
+        // field has the caret by then ("콘솔", then "솔ㅇ" in the next field). One frame without the input
+        // method makes it drop it (see the patch in vendor/winit); the field asks for it again right after.
+        if state.release && matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+            state.release = false;
+            *shell.input_method_mut() = InputMethod::Disabled;
+            shell.request_redraw();
         }
         let now = state.composing.is_some();
         if now != was

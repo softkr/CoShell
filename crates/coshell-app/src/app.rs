@@ -32,6 +32,8 @@ pub const CONFIRM_INPUT: &str = "hostkey-confirm";
 pub const SEARCH_INPUT: &str = "term-search";
 /// The `#` AI question typed at a block-view prompt.
 pub const ASK_INPUT: &str = "term-ask";
+/// Input for the program running in a block-view tab (no shell prompt on screen).
+pub const RUN_INPUT: &str = "term-run";
 pub const RENAME_INPUT: &str = "tab-rename";
 pub const SIDEBAR_SEARCH_INPUT: &str = "sidebar-search";
 /// Two clicks on the active tab within this time start a rename.
@@ -384,6 +386,12 @@ pub struct CoShell {
     pub search: Option<Search>,
     /// Connected SSH tab waiting for "close it?" confirmation.
     pub close_confirm: Option<TabId>,
+    /// Sidebar host whose right-click menu is open.
+    pub host_menu: Option<String>,
+    /// Sidebar host under the pointer: shows its connect / disconnect icon.
+    pub host_hover: Option<String>,
+    /// Host waiting for "delete it?" confirmation (asked from its right-click menu).
+    pub delete_confirm: Option<String>,
     /// Tab being renamed and the text typed so far.
     pub rename: Option<(TabId, String)>,
     last_tab_click: Option<(TabId, std::time::Instant)>,
@@ -400,6 +408,9 @@ pub struct CoShell {
     pub ask: Option<(TabId, String)>,
     /// The question's last syllable was put back together from split pieces ([`crate::hangul`]).
     ask_joined: bool,
+    /// A line typed for the running program (tab, text), sent with Enter; `#…` asks the AI.
+    pub run_input: Option<(TabId, String)>,
+    run_joined: bool,
     /// Production safety lock: changing commands on a production server need a second click.
     /// Destructive commands always do. Session only; starts on.
     pub prod_guard: bool,
@@ -508,8 +519,6 @@ pub enum Message {
     /// Clear the active terminal screen (Ctrl+L).
     TermClear,
     /// Save the active session (screen text + AI chat) as Markdown.
-    ExportSession,
-    ExportSaved(Result<Option<String>, String>),
     /// Ask the AI for a quick health check of the active session.
     AiDiagnose,
     /// Turn the production safety lock on / off.
@@ -539,6 +548,9 @@ pub enum Message {
     /// Send the `#` question to the AI.
     AskSubmit,
     AskCancel,
+    RunInput(String),
+    RunSubmit,
+    RunCancel,
     /// Drop the scrollback after the screen was cleared.
     ClearHistory(TabId),
     NewLocal,
@@ -623,6 +635,14 @@ pub enum Message {
     HostSave(bool),
     HostDelete,
     HostDeleteAsk,
+    /// Right-click menu of a sidebar host opened (`Some`) or dismissed.
+    HostMenu(Option<String>),
+    /// The pointer entered (`true`) or left a sidebar host row.
+    HostHover(String, bool),
+    /// "Delete" picked in a host's right-click menu: asks first.
+    HostMenuDelete(String),
+    HostDeleteConfirmed(String),
+    HostDeleteCancel,
     HostForgetPassword,
     AiToggle,
     About,
@@ -816,6 +836,9 @@ impl CoShell {
             state_dirty: false,
             search: None,
             close_confirm: None,
+            host_menu: None,
+            host_hover: None,
+            delete_confirm: None,
             rename: None,
             last_tab_click: None,
             resizing: None,
@@ -829,6 +852,8 @@ impl CoShell {
             block_hover: None,
             ask: None,
             ask_joined: false,
+            run_input: None,
+            run_joined: false,
         };
         app.rebuild_config();
         app
@@ -841,7 +866,7 @@ impl CoShell {
         self.hosts = self.config.entries();
     }
 
-    fn user_config_entry(&self, alias: &str) -> Option<HostEntry> {
+    pub(crate) fn user_config_entry(&self, alias: &str) -> Option<HostEntry> {
         let user = SshConfig::parse(&self.user_config, &self.home);
         user.aliases().iter().any(|a| a == alias).then(|| user.entry(alias))
     }
@@ -1235,6 +1260,11 @@ impl CoShell {
         iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
     }
 
+    fn focus_run(&mut self) -> Task<Message> {
+        self.term_focus = (self.term_focus.0 + 1, false);
+        iced::widget::operation::focus(RUN_INPUT)
+    }
+
     fn focus_ask(&mut self) -> Task<Message> {
         self.term_focus = (self.term_focus.0 + 1, false);
         iced::widget::operation::focus(ASK_INPUT)
@@ -1300,11 +1330,14 @@ impl CoShell {
     /// on a command records when it started, and Tab / → take the inline suggestion.
     fn terminal_input(&mut self, id: TabId, bytes: Vec<u8>) -> Task<Message> {
         let special = matches!(bytes.as_slice(), b"\r" | b"\t" | b"\x1b[C" | b"\x1bOC" | b"#");
-        let typed = if special {
-            self.tabs.iter().find(|t| t.id == id).and_then(|t| self.screen_of(t)).and_then(|s| s.current).map(|(_, typed)| typed)
-        } else {
-            None
-        };
+        let screen = if special { self.tabs.iter().find(|t| t.id == id).and_then(|t| self.screen_of(t)) } else { None };
+        // `#` while a program runs (no prompt to type it on) opens the app's input for an AI question.
+        if bytes == b"#" && self.run_input.is_none() && screen.as_ref().is_some_and(|s| s.current.is_none()) {
+            self.run_input = Some((id, "#".into()));
+            self.run_joined = false;
+            return self.focus_run();
+        }
+        let typed = screen.and_then(|s| s.current).map(|(_, typed)| typed);
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
         let Tab { phase: Phase::Live(s), exited: false, metas, .. } = tab else { return Task::none() };
         let Some(typed) = typed else {
@@ -1382,46 +1415,6 @@ impl CoShell {
             None => self.notice = Some(tr("여러 줄은 복사해서 사용").into()),
         }
         self.focus_terminal()
-    }
-
-    /// The active session as Markdown: the screen and scrollback, then the AI conversation.
-    fn session_markdown(&self) -> Option<(String, String)> {
-        let tab = self.active_tab()?;
-        let Phase::Live(s) = &tab.phase else { return None };
-        let target = if tab.is_local() { coshell_term::local_shell_name().to_string() } else { tab.route.last().cloned().unwrap_or_default() };
-        let mut md = format!("# CoShell — {}\n\n", tab.display_name());
-        md.push_str(&format!("- {}: `{target}`\n", tr("대상")));
-        if tab.env != Env::None {
-            md.push_str(&format!("- {}: {}\n", tr("환경"), tab.env.label()));
-        }
-        md.push_str(&format!("\n## {}\n\n```text\n{}\n```\n", tr("터미널"), s.recent_text(self.settings.scrollback).trim_end()));
-        let turns: Vec<&Turn> = tab.chat.turns.iter().filter(|t| !t.hidden && !t.text.trim().is_empty()).collect();
-        if !turns.is_empty() {
-            md.push_str(&format!("\n## {}\n", tr("AI 대화")));
-            for t in turns {
-                let who = if t.role == Role::User { tr("사용자").to_string() } else { format!("AI · {}", t.model) };
-                md.push_str(&format!("\n### {who}\n\n{}\n", t.text.trim()));
-            }
-        }
-        let file: String = tab.display_name().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
-        Some((format!("coshell-{}.md", file.trim_matches('-')), md))
-    }
-
-    fn export_session(&mut self) -> Task<Message> {
-        let Some((name, md)) = self.session_markdown() else {
-            self.notice = Some(tr("열린 터미널이 없습니다").into());
-            return Task::none();
-        };
-        Task::perform(
-            async move {
-                let Some(f) = rfd::AsyncFileDialog::new().set_file_name(&name).add_filter("Markdown", &["md"]).save_file().await else {
-                    return Ok(None);
-                };
-                std::fs::write(f.path(), md).map_err(|e| e.to_string())?;
-                Ok(Some(f.path().display().to_string()))
-            },
-            Message::ExportSaved,
-        )
     }
 
     fn ai_send(&mut self, id: TabId) -> Task<Message> {
@@ -1977,14 +1970,34 @@ impl CoShell {
                 self.ask = None;
                 self.focus_terminal()
             }
-            Message::ExportSession => self.export_session(),
-            Message::ExportSaved(r) => {
-                match r {
-                    Ok(Some(path)) => self.notice = Some(tf("세션 기록을 저장했습니다: {0}", &[&path])),
-                    Ok(None) => {}
-                    Err(e) => self.notice = Some(tf("세션 기록 저장 실패: {0}", &[&e])),
+            Message::RunInput(text) => {
+                let Some(id) = self.active else { return Task::none() };
+                if text.is_empty() {
+                    self.run_input = None;
+                    return self.focus_terminal();
                 }
+                let joined = match &self.run_input {
+                    Some((_, old)) => crate::hangul::join_split(old, &text, &mut self.run_joined),
+                    None => None,
+                };
+                self.run_input = Some((id, joined.unwrap_or(text)));
                 Task::none()
+            }
+            Message::RunSubmit => {
+                let Some((id, text)) = self.run_input.take() else { return Task::none() };
+                let focus = self.focus_terminal();
+                if let Some(q) = text.trim_start().strip_prefix('#') {
+                    let q = q.trim().to_string();
+                    return if q.is_empty() { focus } else { Task::batch([focus, self.ask_from_terminal(id, q)]) };
+                }
+                if let Some(Tab { phase: Phase::Live(s), exited: false, .. }) = self.tab_mut(id) {
+                    s.write(format!("{text}\r").as_bytes());
+                }
+                focus
+            }
+            Message::RunCancel => {
+                self.run_input = None;
+                self.focus_terminal()
             }
             Message::AiDiagnose => {
                 let Some(id) = self.active else { return Task::none() };
@@ -2319,7 +2332,36 @@ impl CoShell {
                 self.about_check = Some(AboutCheck::Checking);
                 Task::perform(crate::update::check(), Message::UpdateChecked)
             }
-            Message::HostEdit(a) => self.open_editor(Some(a)),
+            Message::HostEdit(a) => {
+                self.host_menu = None;
+                self.open_editor(Some(a))
+            }
+            Message::HostMenu(a) => {
+                self.host_menu = a;
+                Task::none()
+            }
+            Message::HostHover(a, inside) => {
+                if inside {
+                    self.host_hover = Some(a);
+                } else if self.host_hover.as_deref() == Some(a.as_str()) {
+                    // Only this row's own exit clears it: the next row's enter may come first.
+                    self.host_hover = None;
+                }
+                Task::none()
+            }
+            Message::HostMenuDelete(a) => {
+                self.host_menu = None;
+                self.delete_confirm = self.host_store.get(&a).is_some().then_some(a);
+                Task::none()
+            }
+            Message::HostDeleteConfirmed(a) => {
+                self.delete_confirm = None;
+                self.delete_host(&a)
+            }
+            Message::HostDeleteCancel => {
+                self.delete_confirm = None;
+                Task::none()
+            }
             Message::HostView => {
                 self.host_view = !self.host_view;
                 if self.host_view { Task::none() } else { self.focus_terminal() }
@@ -2407,20 +2449,25 @@ impl CoShell {
             Message::HostDeleteAsk => ed.confirm_delete = true,
             Message::HostDelete => {
                 if let Some(a) = ed.original.clone() {
-                    let key = self.password_key_of(&a);
-                    self.host_store.remove(&a);
                     self.editor = None;
-                    let task = self.persist_hosts(None);
-                    if let Some(k) = key {
-                        self.drop_password_if_unused(&k);
-                    }
-                    return task;
+                    return self.delete_host(&a);
                 }
             }
             Message::HostSave(connect) => return self.save_editor(connect),
             _ => {}
         }
         Task::none()
+    }
+
+    /// Removes a saved server, and its password once no other server uses it.
+    fn delete_host(&mut self, alias: &str) -> Task<Message> {
+        let key = self.password_key_of(alias);
+        self.host_store.remove(alias);
+        let task = self.persist_hosts(None);
+        if let Some(k) = key {
+            self.drop_password_if_unused(&k);
+        }
+        task
     }
 
     fn save_editor(&mut self, connect: bool) -> Task<Message> {
@@ -2713,7 +2760,6 @@ impl CoShell {
             text: String::new(),
             sent,
             attachment: None,
-            model: String::new(),
             stopped: false,
             execs: Vec::new(),
             hidden: true,
@@ -2805,6 +2851,8 @@ impl CoShell {
                 Task::none()
             }
             Shortcut::Settings => self.update(if self.settings_draft.is_some() { Message::SettingsClose } else { Message::SettingsOpen }),
+            Shortcut::Escape if self.host_menu.is_some() => self.update(Message::HostMenu(None)),
+            Shortcut::Escape if self.delete_confirm.is_some() => self.update(Message::HostDeleteCancel),
             Shortcut::Escape if self.update_confirm => self.update(Message::UpdateCancel),
             Shortcut::Escape if self.key_import.is_some() => self.update(Message::KeyImportClose),
             Shortcut::Escape if self.editor.is_some() => self.update(Message::HostEditorClose),
@@ -2829,6 +2877,7 @@ impl CoShell {
                 self.update(Message::SearchClose)
             }
             Shortcut::Escape if self.ask.as_ref().is_some_and(|(id, _)| Some(*id) == self.active) => self.update(Message::AskCancel),
+            Shortcut::Escape if self.run_input.as_ref().is_some_and(|(id, _)| Some(*id) == self.active) => self.update(Message::RunCancel),
             Shortcut::Escape => match self.active {
                 Some(id) if self.active_tab().is_some_and(|t| t.prompt.is_some()) => self.update(Message::PromptCancel(id)),
                 _ => Task::none(),

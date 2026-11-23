@@ -210,9 +210,13 @@ pub fn system_prompt(target: &str, agent: bool) -> String {
     )
 }
 
+/// A progress figure at the end of a line (`Reading package lists... 61%`): output, not zsh's `%`.
+static PERCENT_END: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[\s(\[])\d+(?:\.\d+)?%$").expect("percent regex"));
+
 /// The shell is waiting for input on this line (`$`, `#`, `%`, `>`, `❯`, `➜` at the end).
 pub fn looks_like_prompt(line: &str) -> bool {
-    line.trim_end().ends_with(['$', '#', '%', '>', '❯', '➜'])
+    let line = line.trim_end();
+    line.ends_with(['$', '#', '%', '>', '❯', '➜']) && !PERCENT_END.is_match(line)
 }
 
 /// What `cmd` printed on screen: the lines after the one where it was typed at `prompt`.

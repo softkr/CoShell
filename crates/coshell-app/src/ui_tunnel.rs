@@ -4,7 +4,7 @@ use crate::i18n::{tf, tr};
 use std::sync::atomic::Ordering;
 
 use coshell_ssh::ForwardSpec;
-use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{Space, button, checkbox, column, container, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::app::{CoShell, Message, Tab, TunnelEntry, TunnelField, TunnelForm, TunnelState, form_spec};
@@ -305,7 +305,7 @@ pub fn popover(app: &CoShell) -> El<'_> {
         col = col.push(list);
     }
     col = col.push(add_form(app));
-    let card = container(scrollable(col).height(Length::Shrink))
+    let card = container(crate::ui::scroll(col).height(Length::Shrink))
         .padding(14)
         .width(POPOVER_W)
         .max_height(POPOVER_MAX_H)

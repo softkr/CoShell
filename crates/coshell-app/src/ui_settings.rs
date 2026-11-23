@@ -1,7 +1,7 @@
 //! Settings dialog (⌘,): general (terminal look, behaviour, shortcuts), servers and AI pages.
 
 use crate::i18n::{tf, tr};
-use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
+use iced::widget::{Space, button, checkbox, column, container, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length};
 
 use crate::app::{CoShell, Message, SettingsDraft, SettingsTab};
@@ -121,7 +121,7 @@ fn nav<'a>(current: SettingsTab) -> El<'a> {
 
 pub fn dialog<'a>(app: &'a CoShell, d: &'a SettingsDraft) -> El<'a> {
     let page: El<'a> = match d.tab {
-        SettingsTab::General => scrollable(container(general(d)).padding([0, 12])).height(Length::Fill).into(),
+        SettingsTab::General => crate::ui::scroll(container(general(d)).padding([0, 12])).height(Length::Fill).into(),
         SettingsTab::Servers => crate::ui_servers::manage(app),
         SettingsTab::Keys => crate::ui_keys::page(app),
         SettingsTab::Ai => match &app.ai.settings {

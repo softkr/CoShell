@@ -60,7 +60,7 @@ fn ai_with(active: &str, keys: &[(&str, &str)]) -> Ai {
 }
 
 fn turn(role: Role, text: &str) -> Turn {
-    Turn { role, text: text.into(), sent: text.into(), attachment: None, model: "m".into(), stopped: false, execs: Vec::new(), hidden: false }
+    Turn { role, text: text.into(), sent: text.into(), attachment: None, stopped: false, execs: Vec::new(), hidden: false }
 }
 
 #[test]
@@ -481,6 +481,10 @@ fn server_page_groups_cards_and_actions() {
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
         let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("servers"));
     }
+    drop(ui);
+    // The board's card, not the sidebar row of the same name (which needs its plug icon).
+    app.settings.sidebar_open = false;
+    let mut ui = simulator(ui::view(&app));
     ui.click("mac-server").expect("card clickable");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(m, Message::HostConnect(a) if a == "mac")), "{msgs:?}");
@@ -914,6 +918,68 @@ fn server_delete_needs_a_second_press() {
     assert!(app.host_store.get("web").is_none());
 }
 
+#[test]
+fn host_right_click_menu_edits_and_deletes() {
+    use iced::mouse::{Button, Event as M};
+    let mut store = HostStore::default();
+    store.upsert(None, HostDef { alias: "web".into(), name: Some("웹 서버".into()), hostname: Some("10.0.0.1".into()), ..HostDef::default() });
+    let mut app = app_with("", store, None, ai_with("ollama", &[]));
+
+    // Right click on the row opens its menu; a left click would connect instead.
+    let mut ui = simulator(ui::view(&app));
+    let row = ui.find("10.0.0.1").expect("host row").visible_bounds().expect("visible");
+    ui.point_at(row.center());
+    let _ = ui.simulate([mouse(M::ButtonPressed(Button::Right)), mouse(M::ButtonReleased(Button::Right))]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::HostMenu(Some(a)) if a == "web")), "{messages:?}");
+    assert!(!messages.iter().any(|m| matches!(m, Message::HostConnect(_))), "{messages:?}");
+    let _ = app.update(Message::HostMenu(Some("web".into())));
+
+    // Edit opens the editor and closes the menu.
+    let mut ui = simulator(ui::view(&app));
+    ui.click("편집").expect("edit item");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(messages.as_slice(), [Message::HostEdit(a)] if a == "web"), "{messages:?}");
+    let _ = app.update(Message::HostEdit("web".into()));
+    assert!(app.editor.is_some() && app.host_menu.is_none());
+    let _ = app.update(Message::HostEditorClose);
+
+    // A click elsewhere only dismisses it.
+    let _ = app.update(Message::HostMenu(Some("web".into())));
+    let mut ui = simulator(ui::view(&app));
+    ui.point_at((TERM_LEFT + 50.0, IN_TERMINAL_Y));
+    let _ = ui.simulate([mouse(M::ButtonPressed(Button::Left)), mouse(M::ButtonReleased(Button::Left))]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(messages.as_slice(), [Message::HostMenu(None)]), "{messages:?}");
+
+    // Delete asks first; cancelling keeps the server.
+    let _ = app.update(Message::HostMenu(Some("web".into())));
+    let mut ui = simulator(ui::view(&app));
+    ui.click("삭제").expect("delete item");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(messages.as_slice(), [Message::HostMenuDelete(a)] if a == "web"), "{messages:?}");
+    let _ = app.update(Message::HostMenuDelete("web".into()));
+    assert!(app.host_menu.is_none() && app.delete_confirm.as_deref() == Some("web"));
+    simulator(ui::view(&app)).find("웹 서버 서버를 삭제할까요?").expect("confirm dialog");
+    let _ = app.update(Message::HostDeleteCancel);
+    assert!(app.host_store.get("web").is_some());
+
+    let _ = app.update(Message::HostMenuDelete("web".into()));
+    let _ = app.update(Message::HostDeleteConfirmed("web".into()));
+    assert!(app.host_store.get("web").is_none() && app.delete_confirm.is_none());
+}
+
+#[test]
+fn ssh_config_hosts_cannot_be_deleted_from_the_menu() {
+    let mut app = app_with("Host bastion\n  HostName 10.0.0.9\n", HostStore::default(), None, ai_with("ollama", &[]));
+    let _ = app.update(Message::HostMenu(Some("bastion".into())));
+    let mut ui = simulator(ui::view(&app));
+    ui.click("삭제").expect("delete item");
+    assert_eq!(ui.into_messages().count(), 0, "disabled");
+    let _ = app.update(Message::HostMenuDelete("bastion".into()));
+    assert!(app.delete_confirm.is_none());
+}
+
 fn mouse(e: iced::mouse::Event) -> iced::Event {
     iced::Event::Mouse(e)
 }
@@ -1083,9 +1149,23 @@ fn sidebar_lists_servers_and_snippets_type_into_the_terminal() {
     let id = app.open_local();
     let mut ui = simulator(ui::view(&app));
     ui.find("운영").expect("environment group header");
+    // A stray click on the row does not connect; the plug that shows on hover does.
     ui.click("web-01").expect("server row");
     let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(!msgs.iter().any(|m| matches!(m, Message::HostConnect(_))), "{msgs:?}");
+    let mut ui = simulator(ui::view(&app));
+    ui.find(iced::widget::Id::new(crate::ui_sidebar::HOST_ACTION)).expect_err("no icon until hovered");
+    drop(ui);
+    let _ = app.update(Message::HostHover("web".into(), true));
+    let mut ui = simulator(ui::view(&app));
+    ui.click(iced::widget::Id::new(crate::ui_sidebar::HOST_ACTION)).expect("connect icon");
+    let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(m, Message::HostConnect(a) if a == "web")), "{msgs:?}");
+    // Leaving another row does not clear this one's hover.
+    let _ = app.update(Message::HostHover("other".into(), false));
+    assert_eq!(app.host_hover.as_deref(), Some("web"));
+    let _ = app.update(Message::HostHover("web".into(), false));
+    assert!(app.host_hover.is_none());
 
     // Folding a group hides its servers.
     let _ = app.update(Message::GroupToggle("운영".into()));
@@ -1650,8 +1730,7 @@ fn readme_screenshots() {
         .as_bytes(),
     );
     {
-        let model = "claude-sonnet-5-5";
-        let t = |role, text: &str| Turn { model: model.into(), ..turn(role, text) };
+        let t = turn;
         let chat = &mut app.tabs.iter_mut().find(|t| t.id == id).unwrap().chat;
         chat.turns.push(t(Role::User, "nginx가 왜 안 떠?"));
         chat.turns.push(Turn {
@@ -1894,6 +1973,64 @@ fn composing_syllable_is_kept_when_the_caret_moves_away() {
     }
 }
 
+/// Wraps a view and records, on every redraw, whether it asked for the input method.
+struct ImeProbe<'a> {
+    content: iced::Element<'a, Message>,
+    seen: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+}
+
+impl iced::advanced::Widget<Message, iced::Theme, iced::Renderer> for ImeProbe<'_> {
+    fn size(&self) -> iced::Size<iced::Length> {
+        self.content.as_widget().size()
+    }
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.content)]
+    }
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+    fn layout(&mut self, tree: &mut iced::advanced::widget::Tree, renderer: &iced::Renderer, limits: &iced::advanced::layout::Limits) -> iced::advanced::layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+    fn draw(&self, tree: &iced::advanced::widget::Tree, renderer: &mut iced::Renderer, theme: &iced::Theme, style: &iced::advanced::renderer::Style, layout: iced::advanced::Layout<'_>, cursor: iced::mouse::Cursor, viewport: &iced::Rectangle) {
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+    }
+    fn operate(&mut self, tree: &mut iced::advanced::widget::Tree, layout: iced::advanced::Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn iced::advanced::widget::Operation) {
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+    fn update(&mut self, tree: &mut iced::advanced::widget::Tree, event: &iced::Event, layout: iced::advanced::Layout<'_>, cursor: iced::mouse::Cursor, renderer: &iced::Renderer, clipboard: &mut dyn iced::advanced::Clipboard, shell: &mut iced::advanced::Shell<'_, Message>, viewport: &iced::Rectangle) {
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
+        if matches!(event, iced::Event::Window(iced::window::Event::RedrawRequested(_))) {
+            self.seen.borrow_mut().push(matches!(shell.input_method_mut(), iced::advanced::InputMethod::Enabled { .. }));
+        }
+    }
+}
+
+#[test]
+fn input_method_lets_go_of_a_syllable_the_app_committed() {
+    use iced::advanced::input_method::Event as Ime;
+    use iced::keyboard::key::Named;
+    let mut app = app();
+    let _id = quiet_tab(&mut app);
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let probe = ImeProbe { content: ui::view(&app), seen: seen.clone() };
+    let mut ui = simulator(iced::Element::new(probe));
+    ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+    let redraw = || iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
+    // "솔" composing; the caret moves away, so the app commits it itself. macOS still holds it as
+    // marked text and would type it again on the next key, into whatever field has the caret then:
+    // one frame without the input method makes it drop it. The field gets it back right after.
+    let _ = ui.simulate([
+        iced::Event::InputMethod(Ime::Opened),
+        iced::Event::InputMethod(Ime::Preedit("솔".into(), None)),
+        redraw(),
+        iced_test::simulator::press_key(Named::ArrowLeft, None),
+        redraw(),
+        redraw(),
+    ]);
+    assert_eq!(*seen.borrow(), [true, false, true]);
+}
+
 #[test]
 fn enter_sends_the_composing_syllable_once() {
     use iced::advanced::input_method::Event as Ime;
@@ -2003,9 +2140,9 @@ fn layout_buttons_hide_and_show_panels() {
     // The status bar has no header button but still toggles from ⌘J and the menu.
     let _ = app.update(Message::StatusBarToggle);
     assert!(!app.settings.statusbar_open);
-    simulator(ui::view(&app)).find("xterm-256color").expect_err("status bar hidden");
+    simulator(ui::view(&app)).find("UTF-8").expect_err("status bar hidden");
     let _ = app.update(Message::StatusBarToggle);
-    simulator(ui::view(&app)).find("xterm-256color").expect("status bar back");
+    simulator(ui::view(&app)).find("UTF-8").expect("status bar back");
 }
 
 #[test]
@@ -2034,6 +2171,86 @@ fn hash_at_an_empty_prompt_asks_in_an_app_field() {
     let _ = app.update(Message::Input(id, b"#".to_vec()));
     let _ = app.update(Message::AskCancel);
     assert!(app.ask.is_none());
+}
+
+#[test]
+fn input_dock_stays_while_a_command_runs() {
+    use crate::blocks::Sig;
+    let mut app = app();
+    let id = app.open_local();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    feed(&app, id, b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ sudo apt upgrade\r\nDo you want to continue? [Y/n] ");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().sig = Some(Sig::UserHost("ops@app-01".into()));
+    assert!(app.screen_of(app.tabs.iter().find(|t| t.id == id).unwrap()).is_some_and(|s| s.running()));
+
+    // Still an input row: typed into, then sent to the program.
+    let mut ui = simulator(ui::view(&app));
+    ui.find("실행 중").expect("running badge");
+    ui.find("중단").expect("interrupt button");
+    drop(ui);
+    let _ = app.update(Message::RunInput("y".into()));
+    assert_eq!(app.run_input, Some((id, "y".to_string())));
+    let _ = app.update(Message::RunSubmit);
+    assert!(app.run_input.is_none());
+
+    // # from the terminal opens the field for an AI question, which goes to the AI.
+    let _ = app.update(Message::Input(id, b"#".to_vec()));
+    assert_eq!(app.run_input, Some((id, "#".to_string())), "# opens the field instead of reaching the program");
+    let _ = app.update(Message::RunInput("#왜 느려?".into()));
+    let _ = app.update(Message::RunSubmit);
+    assert!(app.run_input.is_none() && app.ai.open);
+    assert_eq!(app.notice.as_deref(), Some("터미널에서 AI에게 질문을 전달했습니다"));
+
+    // Clearing the field or Esc gives the keyboard back to the terminal.
+    let _ = app.update(Message::Input(id, b"#".to_vec()));
+    let _ = app.update(Message::RunInput(String::new()));
+    assert!(app.run_input.is_none());
+    let _ = app.update(Message::RunInput("abc".into()));
+    let _ = app.update(Message::RunCancel);
+    assert!(app.run_input.is_none());
+}
+
+#[test]
+fn tab_dot_shows_the_session_state() {
+    let mut app = app();
+    let id = app.open_local();
+    let color = |app: &CoShell| ui::tab_color(app.tabs.iter().find(|t| t.id == id).unwrap());
+    assert_eq!(color(&app), crate::theme::OK, "connected");
+    let t = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+    t.env = crate::hosts::Env::Prod;
+    t.metas.push(crate::blocks::Meta::new("sudo apt upgrade -y", crate::blocks::Source::User));
+    assert_eq!(color(&app), crate::theme::WARN, "a command is running");
+    let t = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+    t.metas.last_mut().unwrap().took = Some(std::time::Duration::from_secs(3));
+    assert_eq!(color(&app), crate::theme::OK, "done: back to green, even on production");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().exited = true;
+    assert_eq!(color(&app), crate::theme::ERR_TX, "disconnected");
+}
+
+#[test]
+fn connected_server_disconnects_from_its_hover_icon() {
+    let mut store = HostStore::default();
+    store.upsert(None, HostDef { alias: "web".into(), name: Some("web-01".into()), hostname: Some("10.0.0.1".into()), ..HostDef::default() });
+    let mut app = app_with("", store, None, ai_with("ollama", &[]));
+    let id = app.open_local();
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().alias = Some("web".into());
+    // Clicking a connected row still switches to its tab.
+    let mut ui = simulator(ui::view(&app));
+    ui.click("web-01").expect("server row");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::Activate(t) if *t == id)), "{msgs:?}");
+    let _ = app.update(Message::HostHover("web".into(), true));
+    let mut ui = simulator(ui::view(&app));
+    ui.click(iced::widget::Id::new(crate::ui_sidebar::HOST_ACTION)).expect("disconnect icon");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::Close(t) if *t == id)), "{msgs:?}");
+
+    // Once the session is gone the same icon reconnects.
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().exited = true;
+    let mut ui = simulator(ui::view(&app));
+    ui.click(iced::widget::Id::new(crate::ui_sidebar::HOST_ACTION)).expect("reconnect icon");
+    let msgs: Vec<Message> = ui.into_messages().collect();
+    assert!(msgs.iter().any(|m| matches!(m, Message::Retry(t) if *t == id)), "{msgs:?}");
 }
 
 #[test]

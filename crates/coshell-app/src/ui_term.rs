@@ -4,10 +4,10 @@
 
 use crate::i18n::{tf, tr};
 use iced::widget::text::{LineHeight, Span};
-use iced::widget::{Space, button, column, container, mouse_area, rich_text, row, scrollable, span, text, text_input};
+use iced::widget::{Space, button, column, container, mouse_area, rich_text, row, span, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
-use crate::app::{ASK_INPUT, CoShell, Message, SEARCH_INPUT, Tab};
+use crate::app::{ASK_INPUT, CoShell, Message, RUN_INPUT, SEARCH_INPUT, Tab};
 use crate::blocks::{self, Block, Mark, Prompt, Screen, Source};
 use crate::fonts::MONO;
 use crate::icons::{COPY, SEARCH, SEND, X};
@@ -149,6 +149,71 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
     mouse_area(card).on_enter(Message::BlockHover(Some(i))).on_exit(Message::BlockHover(None)).into()
 }
 
+/// No prompt on screen (a command is running): a line for the program, sent with Enter.
+/// `#…` asks the AI instead; `secret` hides what is typed (a password prompt).
+fn run_row<'a>(app: &'a CoShell, tab: &Tab, running: bool, secret: bool) -> El<'a> {
+    let value = app.run_input.as_ref().filter(|(id, _)| *id == tab.id).map_or("", |(_, t)| t.as_str());
+    let ai_mode = value.trim_start().starts_with('#');
+    let mut r = row![].spacing(8).align_y(Alignment::Center);
+    if running {
+        r = r.push(
+            container(row![crate::ui::dot(theme::INFO, 6.0), text(tr("실행 중")).size(10.5).font(crate::ui::SEMIBOLD).color(theme::INFO)].spacing(5).align_y(Alignment::Center))
+                .padding([2, 8])
+                .style(|_| container::Style {
+                    background: Some(Background::Color(alpha(theme::INFO, 0.12))),
+                    border: Border { color: alpha(theme::INFO, 0.3), width: 1.0, radius: crate::ui::R_PILL.into() },
+                    ..Default::default()
+                }),
+        );
+    }
+    let placeholder = if secret { tr("비밀번호 입력 후 Enter (화면에 표시되지 않음)") } else { tr("실행 중인 프로그램에 입력 후 Enter · '#'으로 AI 질문") };
+    r = r.push(
+        text_input(placeholder, value)
+            .id(RUN_INPUT)
+            .on_input(Message::RunInput)
+            .on_submit(Message::RunSubmit)
+            .secure(secret && !ai_mode)
+            .font(MONO)
+            .size(TEXT)
+            .padding(0)
+            .width(Length::Fill)
+            .style(move |t, st| text_input::Style {
+                value: if ai_mode { theme::PURPLE } else { theme::SLATE_100 },
+                placeholder: theme::TEXT_3,
+                ..crate::ui::bare_input_style(t, st)
+            }),
+    );
+    if !value.is_empty() {
+        r = r.push(mono(tr("Enter 전송 · Esc 취소"), 11.0, theme::TEXT_3));
+    }
+    // Ctrl+C for the program, wherever the keyboard is.
+    let stop = button(text(tr("중단")).size(11.5).font(crate::ui::MEDIUM))
+        .padding([5, 10])
+        .on_press(Message::Input(tab.id, b"\x03".to_vec()))
+        .style(crate::ui::tint_style(theme::ERR_TX, true));
+    r = r.push(crate::ui::tip(stop, tr("Ctrl+C 보내기"), iced::widget::tooltip::Position::Top));
+    let send = button(container(crate::icons::tinted(&SEND, 13.0, theme::ON_ACCENT)).center(28))
+        .padding(0)
+        .on_press(if value.is_empty() { Message::Input(tab.id, b"\r".to_vec()) } else { Message::RunSubmit })
+        .style(|_, st| button::Style {
+            background: Some(Background::Color(alpha(theme::ACCENT, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.88 } else { 1.0 }))),
+            border: Border { radius: 10.0.into(), ..Default::default() },
+            ..Default::default()
+        });
+    r = r.push(send);
+    let focused = app.run_input.as_ref().is_some_and(|(id, _)| *id == tab.id);
+    container(r)
+        .padding(Padding { top: 8.0, right: 8.0, bottom: 8.0, left: 14.0 })
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(theme::BG_2)),
+            border: Border { color: if focused { alpha(theme::ACCENT, 0.45) } else { theme::LINE }, width: if focused { 1.5 } else { 1.0 }, radius: R_DOCK.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.3), offset: iced::Vector::new(0.0, 6.0), blur_radius: 18.0 },
+            ..Default::default()
+        })
+        .into()
+}
+
 /// The prompt waiting for input: what is typed, the caret, and an inline suggestion.
 fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail: usize) -> El<'a> {
     let asking = app.ask.as_ref().filter(|(id, _)| *id == tab.id).map(|(_, q)| q.as_str());
@@ -270,15 +335,23 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
                 .padding([40, 0]),
         );
     }
-    let dock = screen.current.as_ref().map(|(p, typed)| {
-        let tail = match &tab.phase {
-            crate::app::Phase::Live(s) => blocks::cursor_tail(s.term()),
-            _ => 0,
-        };
-        container(prompt_row(app, tab, p, typed, tail)).padding(Padding { top: 8.0, right: 28.0, bottom: 16.0, left: 28.0 })
-    });
+    // At a prompt the dock mirrors the shell's line; with none (a program running) it takes input for it.
+    let dock = match &screen.current {
+        Some((p, typed)) => {
+            let tail = match &tab.phase {
+                crate::app::Phase::Live(s) => blocks::cursor_tail(s.term()),
+                _ => 0,
+            };
+            prompt_row(app, tab, p, typed, tail)
+        }
+        None => {
+            let last_line = screen.blocks.last().map_or(&screen.preamble, |b| &b.output).iter().rev().find(|l| !l.trim().is_empty());
+            run_row(app, tab, running, last_line.is_some_and(|l| blocks::asks_secret(l)))
+        }
+    };
+    let dock = Some(container(dock).padding(Padding { top: 8.0, right: 28.0, bottom: 16.0, left: 28.0 }));
     col = col.push(Space::new().height(24));
-    let body = scrollable(container(col).padding(Padding { top: 24.0, right: 28.0, bottom: 0.0, left: 28.0 }).width(Length::Fill))
+    let body = crate::ui::scroll(container(col).padding(Padding { top: 24.0, right: 28.0, bottom: 0.0, left: 28.0 }).width(Length::Fill))
         .anchor_bottom()
         .height(Length::Fill)
         .width(Length::Fill);

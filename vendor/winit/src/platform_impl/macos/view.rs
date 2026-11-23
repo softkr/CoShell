@@ -939,6 +939,12 @@ impl WinitView {
         // Clear markedText
         *self.ivars().marked_text.borrow_mut() = NSMutableAttributedString::new();
 
+        // CoShell patch: let the input method drop its composition too. Otherwise it keeps it
+        // and inserts it on the next key, into whatever field the app has focused by then.
+        if let Some(input_context) = self.inputContext() {
+            input_context.discardMarkedText();
+        }
+
         if self.ivars().ime_state.get() != ImeState::Disabled {
             self.ivars().ime_state.set(ImeState::Disabled);
             self.queue_event(WindowEvent::Ime(Ime::Disabled));

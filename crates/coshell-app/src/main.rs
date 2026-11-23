@@ -9,6 +9,7 @@ mod assist;
 mod blocks;
 mod metrics;
 mod conn;
+mod context_menu;
 mod fonts;
 mod hangul;
 mod hosts;

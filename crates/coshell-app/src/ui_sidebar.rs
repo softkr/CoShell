@@ -2,12 +2,13 @@
 //! session card and a footer (server count, version).
 
 use crate::i18n::{tf, tr};
-use iced::widget::{Space, button, column, container, row, scrollable, svg, text, text_input};
+use iced::widget::{Space, button, column, container, mouse_area, row, svg, text, text_input};
 use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::app::{CoShell, Message, Phase, SIDEBAR_SEARCH_INPUT, SidebarTab};
+use crate::context_menu::ContextMenu;
 use crate::hosts::Env;
-use crate::icons::{CHEVRON_DOWN, PLUS, SEARCH};
+use crate::icons::{CHEVRON_DOWN, PLUG, PLUS, SEARCH, UNPLUG};
 use crate::theme::{self, alpha};
 use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn_style, dot, fill, kbd, mono, muted};
 
@@ -27,6 +28,11 @@ pub const SNIPPETS: &[Snippet] = &[
     Snippet { title: "최근 시스템 에러 로그", category: "장애", cmd: "journalctl -p err -n 20 --no-pager" },
     Snippet { title: "열린 포트", category: "네트워크", cmd: "ss -tlnp" },
 ];
+
+/// Width of a host's right-click menu.
+const HOST_MENU_W: f32 = 140.0;
+/// The connect / disconnect icon on the hovered host row.
+pub const HOST_ACTION: &str = "sidebar-host-action";
 
 pub fn sidebar(app: &CoShell) -> El<'_> {
     let content: El<'_> = match app.sidebar_tab {
@@ -48,7 +54,7 @@ pub fn sidebar(app: &CoShell) -> El<'_> {
             ..Default::default()
         });
     let mut col = column![head(app), container(search).padding(Padding { top: 0.0, right: 12.0, bottom: 10.0, left: 12.0 })];
-    col = col.push(scrollable(container(content).padding(Padding { top: 0.0, right: 10.0, bottom: 8.0, left: 10.0 })).height(Length::Fill));
+    col = col.push(crate::ui::scroll(container(content).padding(Padding { top: 0.0, right: 10.0, bottom: 8.0, left: 10.0 })).height(Length::Fill));
     if let Some(card) = resource_card(app) {
         col = col.push(container(card).padding(Padding { top: 0.0, right: 12.0, bottom: 12.0, left: 12.0 }));
     }
@@ -162,10 +168,10 @@ fn servers(app: &CoShell) -> El<'_> {
                 let alias = e.alias.clone();
                 let open_tab = app.tabs.iter().find(|t| t.alias.as_deref() == Some(alias.as_str()));
                 let active = active_alias.as_deref() == Some(alias.as_str());
-                let msg = match open_tab {
-                    Some(t) => Message::Activate(t.id),
-                    None => Message::HostConnect(alias.clone()),
-                };
+                let menu_open = app.host_menu.as_deref() == Some(alias.as_str());
+                let hovered = app.host_hover.as_deref() == Some(alias.as_str());
+                // Connecting takes the plug icon, so a stray click on the row does nothing.
+                let msg = open_tab.map(|t| Message::Activate(t.id));
                 let disk = open_tab.and_then(|t| t.stats.as_ref()).map(|s| s.disk).filter(|d| *d >= 85);
                 let on = |c: Color| if active { Color::WHITE } else { c };
                 let mono_medium = crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Medium);
@@ -182,9 +188,9 @@ fn servers(app: &CoShell) -> El<'_> {
                         ..Default::default()
                     }));
                 }
-                list = list.push(
-                    button(line).width(Length::Fill).padding([7, 10]).on_press(msg).style(move |_, st| {
-                        let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
+                line = line.push(link_icon(open_tab, &alias, active, hovered || menu_open));
+                let row_btn = button(line).width(Length::Fill).padding([7, 10]).on_press_maybe(msg).style(move |_, st| {
+                        let hover = hovered || menu_open || matches!(st, button::Status::Hovered | button::Status::Pressed);
                         button::Style {
                             background: Some(Background::Color(if active {
                                 theme::ACCENT
@@ -197,7 +203,11 @@ fn servers(app: &CoShell) -> El<'_> {
                             border: Border { radius: 10.0.into(), ..Default::default() },
                             ..Default::default()
                         }
-                    }),
+                    });
+                let row_btn = mouse_area(row_btn).on_enter(Message::HostHover(alias.clone(), true)).on_exit(Message::HostHover(alias.clone(), false));
+                list = list.push(
+                    ContextMenu::new(row_btn, Message::HostMenu(Some(alias.clone())), Message::HostMenu(None))
+                        .menu(menu_open.then(|| host_menu(app, &alias))),
                 );
             }
         }
@@ -207,6 +217,71 @@ fn servers(app: &CoShell) -> El<'_> {
         return container(text(tr("일치하는 호스트가 없습니다.")).size(12).color(theme::TEXT_3)).center_x(Length::Fill).padding([32, 0]).into();
     }
     col.into()
+}
+
+/// The host's connection at a glance: a plug in its socket while connected (coloured like its
+/// tab's dot), pulled apart otherwise. Hovered, it turns into the action: unplug to disconnect
+/// (which asks first), plug to connect or reconnect.
+fn link_icon<'a>(open_tab: Option<&crate::app::Tab>, alias: &str, active: bool, hovered: bool) -> El<'a> {
+    let live = open_tab.is_some_and(|t| matches!(t.phase, Phase::Live(_)) && !t.exited);
+    let action = match open_tab {
+        Some(t) if live => Some((&UNPLUG, tr("연결 해제"), Message::Close(t.id), theme::ERR_TX)),
+        Some(t) if matches!(t.phase, Phase::Connecting) => None,
+        Some(t) => Some((&PLUG, tr("다시 연결"), Message::Retry(t.id), theme::OK)),
+        None => Some((&PLUG, tr("연결"), Message::HostConnect(alias.to_string()), theme::OK)),
+    };
+    let Some((icon, label, msg, color)) = action.filter(|_| hovered) else {
+        let icon = if live { &PLUG } else { &UNPLUG };
+        let color = if active { Color::WHITE } else { open_tab.map_or(theme::TEXT_3, crate::ui::tab_color) };
+        return container(crate::icons::tinted(icon, 14.0, color)).center(24).into();
+    };
+    let fg = if active { Color::WHITE } else { color };
+    let b = button(container(crate::icons::tinted(icon, 14.0, fg)).center(24)).padding(0).on_press(msg).style(move |_, st| button::Style {
+        background: Some(Background::Color(alpha(if active { Color::WHITE } else { fg }, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.25 } else { 0.12 }))),
+        border: Border { radius: 6.0.into(), ..Default::default() },
+        ..Default::default()
+    });
+    container(crate::ui::tip(b, label, iced::widget::tooltip::Position::Right)).id(HOST_ACTION).into()
+}
+
+/// 편집 / 삭제 for a sidebar host. Only servers saved here can be deleted
+/// (not ones from ~/.ssh/config).
+fn host_menu<'a>(app: &CoShell, alias: &str) -> El<'a> {
+    let item = |label: &'a str, color: Color, msg: Option<Message>| {
+        button(text(label).size(12.5))
+            .width(Length::Fill)
+            .padding([5, 10])
+            .on_press_maybe(msg)
+            .style(move |_, st| {
+                let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: hover.then_some(Background::Color(theme::ACCENT)),
+                    text_color: match st {
+                        button::Status::Disabled => theme::TEXT_3,
+                        _ if hover => theme::ON_ACCENT,
+                        _ => color,
+                    },
+                    border: Border { radius: 6.0.into(), ..Default::default() },
+                    ..Default::default()
+                }
+            })
+    };
+    let deletable = app.host_store.get(alias).is_some() && app.user_config_entry(alias).is_none();
+    let col = column![
+        item(tr("편집"), theme::TEXT, Some(Message::HostEdit(alias.to_string()))),
+        item(tr("삭제"), theme::ERR_TX, deletable.then(|| Message::HostMenuDelete(alias.to_string()))),
+    ]
+    .spacing(2);
+    container(col)
+        .padding(4)
+        .width(HOST_MENU_W)
+        .style(|_| container::Style {
+            background: Some(Background::Color(theme::BG_2)),
+            border: Border { color: theme::LINE_2, width: 1.0, radius: R_CONTROL.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.45), offset: iced::Vector::new(0.0, 8.0), blur_radius: 24.0 },
+            ..Default::default()
+        })
+        .into()
 }
 
 fn snippets(app: &CoShell) -> El<'_> {

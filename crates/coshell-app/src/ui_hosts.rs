@@ -1,7 +1,7 @@
 //! Host editor and the production attach confirmation.
 
 use crate::i18n::{tf, tr};
-use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text, text_input};
+use iced::widget::{Space, button, column, container, pick_list, row, text, text_input};
 use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::ai::Attachment;
@@ -255,7 +255,7 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
         }
     }
 
-    let mut col = column![container(scrollable(container(col).padding(Padding::ZERO.right(12.0)))).max_height(EDITOR_BODY_MAX_H)].spacing(10);
+    let mut col = column![container(crate::ui::scroll(container(col).padding(Padding::ZERO.right(12.0)))).max_height(EDITOR_BODY_MAX_H)].spacing(10);
     if let Some(e) = &ed.error {
         col = col.push(text(e.clone()).size(11.5).color(theme::ERR_TX));
     }
@@ -300,7 +300,7 @@ pub fn attach_confirm<'a>(app: &'a CoShell, tab_name: &'a str, a: &'a Attachment
                 ..Default::default()
             }),
             muted(tf("{0} · 마스킹 {1}건", &[&a.label, &a.secrets])),
-            container(scrollable(container(mono(a.masked.clone(), 11.5, theme::TEXT)).padding(10)).height(PREVIEW_H))
+            container(crate::ui::scroll(container(mono(a.masked.clone(), 11.5, theme::TEXT)).padding(10)).height(PREVIEW_H))
                 .width(Length::Fill)
                 .style(|_| container::Style {
                     background: Some(Background::Color(theme::BG_0)),

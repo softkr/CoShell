@@ -29,7 +29,6 @@ svg_handle!(KEY, "icons/key.svg");
 svg_handle!(ZAP, "icons/zap.svg");
 svg_handle!(TRASH, "icons/trash.svg");
 svg_handle!(SEARCH, "icons/search.svg");
-svg_handle!(DOWNLOAD, "icons/download.svg");
 svg_handle!(LOCK, "icons/lock.svg");
 svg_handle!(LOCK_OPEN, "icons/lock-open.svg");
 svg_handle!(PENCIL, "icons/pencil.svg");
@@ -37,6 +36,8 @@ svg_handle!(PLUS, "icons/plus.svg");
 svg_handle!(CHEVRON_DOWN, "icons/chevron-down.svg");
 svg_handle!(X, "icons/x.svg");
 svg_handle!(CHECK, "icons/check.svg");
+svg_handle!(PLUG, "icons/plug.svg");
+svg_handle!(UNPLUG, "icons/unplug.svg");
 
 /// 256px PNG for the window / taskbar icon (Windows, Linux; macOS uses the bundle's .icns).
 const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");
