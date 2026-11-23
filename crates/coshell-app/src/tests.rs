@@ -1103,6 +1103,26 @@ fn sidebar_lists_servers_and_snippets_type_into_the_terminal() {
 }
 
 #[test]
+fn ai_face_blinks_and_glances() {
+    let mut app = app();
+    let _ = app.open_local();
+    assert_eq!(app.face, ui::Face::STILL, "eyes open at start");
+    let _ = app.update(Message::FaceBlink);
+    assert!(app.face.blink, "eyes shut");
+    simulator(ui::view(&app)).find("AI 진단").expect("view draws a blinking face");
+    let _ = app.update(Message::FaceBlinkEnd);
+    assert!(!app.face.blink, "eyes open again");
+    let looks: Vec<i8> = (0..4)
+        .map(|_| {
+            let _ = app.update(Message::FaceGlance);
+            app.face.look
+        })
+        .collect();
+    assert_eq!(looks, [1, 0, -1, 0], "glances right, back, left, back");
+    assert_eq!(app.face.idle().look, 0, "an idle face looks ahead");
+}
+
+#[test]
 fn production_lock_controls_the_second_click_for_changes() {
     let mut app = app();
     let id = app.open_local();

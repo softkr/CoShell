@@ -223,17 +223,56 @@ pub(crate) fn kbd<'a>(s: impl Into<String>) -> El<'a> {
 }
 
 /// The assistant's mark: a small iridescent disc (blue through purple to pink).
-pub(crate) fn orb<'a>(size: f32) -> El<'a> {
-    let gradient = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_4 * 3.0))
-        .add_stop(0.0, theme::BLUE)
-        .add_stop(0.5, theme::PURPLE)
-        .add_stop(1.0, iced::Color::from_rgb8(0xFF, 0x37, 0x5F));
-    container(Space::new())
-        .width(size)
-        .height(size)
+/// The AI's expression: eyes shut for a blink, or glancing aside while it works.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Face {
+    pub blink: bool,
+    /// -1 looks left, 1 right, 0 straight ahead.
+    pub look: i8,
+}
+
+impl Face {
+    /// Eyes open, looking ahead: for faces that stay still (old messages, block badges).
+    pub const STILL: Face = Face { blink: false, look: 0 };
+
+    /// Blinks, but keeps looking ahead (the AI is not working on anything).
+    pub fn idle(self) -> Face {
+        Face { look: 0, ..self }
+    }
+}
+
+/// Pill width over its height.
+const FACE_ASPECT: f32 = 1.8;
+/// Eye diameter over the pill's height.
+const FACE_EYE: f32 = 0.32;
+/// Eye height while blinking, over its diameter.
+const FACE_BLINK: f32 = 0.3;
+/// Gap between the eyes, over their diameter.
+const FACE_EYE_GAP: f32 = 0.9;
+/// How far the eyes move on a glance, over their diameter.
+const FACE_LOOK: f32 = 0.45;
+
+/// The AI's mark: a white pill with two eyes, `height` tall.
+pub(crate) fn face<'a>(height: f32, f: Face) -> El<'a> {
+    let eye = (height * FACE_EYE).max(2.0);
+    let eye_h = if f.blink { (eye * FACE_BLINK).max(1.0) } else { eye };
+    let shift = f32::from(f.look) * eye * FACE_LOOK;
+    let pupil = move || {
+        container(Space::new()).width(eye).height(eye_h).style(move |_| container::Style {
+            background: Some(Background::Color(theme::BG_0)),
+            border: Border { radius: (eye / 2.0).into(), ..Default::default() },
+            ..Default::default()
+        })
+    };
+    let eyes = row![pupil(), pupil()].spacing(eye * FACE_EYE_GAP).align_y(Alignment::Center);
+    // Padding on one side moves the centred eyes by `shift`.
+    let aside = Padding { left: (2.0 * shift).max(0.0), right: (-2.0 * shift).max(0.0), ..Padding::ZERO };
+    container(container(eyes).padding(aside).center(Length::Fill))
+        .width(height * FACE_ASPECT)
+        .height(height)
         .style(move |_| container::Style {
-            background: Some(Background::Gradient(gradient.into())),
-            border: Border { radius: (size / 2.0).into(), ..Default::default() },
+            background: Some(Background::Color(theme::TEXT)),
+            border: Border { radius: (height / 2.0).into(), ..Default::default() },
             ..Default::default()
         })
         .into()
@@ -633,7 +672,12 @@ fn tab_bar(app: &CoShell) -> El<'_> {
 
     let live = app.live_tab().is_some() && !app.host_view;
     let diagnose = button(
-        row![orb(10.0), text(tr("AI 진단")).size(11.5).font(MEDIUM)].spacing(6).align_y(Alignment::Center),
+        row![
+            face(12.0, if app.active_tab().is_some_and(|t| t.chat.is_streaming()) { app.face } else { app.face.idle() }),
+            text(tr("AI 진단")).size(11.5).font(MEDIUM)
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .padding([6, 11])
     .on_press_maybe(app.active_tab().map(|_| Message::AiDiagnose))

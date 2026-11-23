@@ -8,7 +8,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-iced = { version = "=0.14.0", features = ["advanced", "tokio", "svg", "image"] }
+iced = { version = "=0.14.0", features = ["advanced", "tokio", "svg", "image", "canvas"] }
 unicode-width = "0.2"
 alacritty_terminal = "=0.26.0"
 portable-pty = "0.9.0"

@@ -25,7 +25,7 @@ const MONO_MEDIUM: Font = crate::fonts::weight(MONO, iced::font::Weight::Medium)
 fn badge<'a>(source: Source) -> El<'a> {
     let (content, bg, line, fg): (El<'a>, Color, Color, Color) = match source {
         Source::Ai => (
-            row![crate::ui::orb(8.0), text("AI").size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center).into(),
+            row![crate::ui::face(10.0, crate::ui::Face::STILL), text("AI").size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center).into(),
             alpha(theme::PURPLE, 0.12),
             alpha(theme::PURPLE, 0.25),
             theme::PURPLE,
@@ -156,7 +156,7 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
     let mut r = row![].spacing(6).align_y(Alignment::Center);
     if ai_mode {
         r = r.push(
-            container(row![crate::ui::orb(8.0), text(tr("AI 질문")).size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center)).padding([2, 8]).style(|_| container::Style {
+            container(row![crate::ui::face(10.0, app.face.idle()), text(tr("AI 질문")).size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center)).padding([2, 8]).style(|_| container::Style {
                 background: Some(Background::Color(alpha(theme::PURPLE, 0.15))),
                 border: Border { color: alpha(theme::PURPLE, 0.3), width: 1.0, radius: crate::ui::R_PILL.into() },
                 ..Default::default()

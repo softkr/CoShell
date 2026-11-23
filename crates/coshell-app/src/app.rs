@@ -53,6 +53,17 @@ const AGENT_WATCH_ROWS: usize = 600;
 const PERSIST_DELAY: Duration = Duration::from_secs(2);
 /// How often running block commands are checked for being done.
 const BLOCK_TICK: Duration = Duration::from_millis(100);
+/// The AI's face blinks this often, with its eyes shut for `BLINK_FOR`.
+const BLINK_EVERY: Duration = Duration::from_millis(4200);
+const BLINK_FOR: Duration = Duration::from_millis(140);
+/// While the AI works, its eyes move to the next of `GLANCE` this often.
+const GLANCE_EVERY: Duration = Duration::from_millis(450);
+const GLANCE: [i8; 4] = [0, 1, 0, -1];
+/// Frame interval of the chat's animated status mark (a timer: it must run on its own,
+/// whether or not anything else makes the window redraw).
+const FOLD_TICK: Duration = Duration::from_millis(16);
+/// A longer pause between frames means the fold stopped: start it over from flat.
+const FOLD_RESTART: Duration = Duration::from_millis(250);
 pub fn prompt_input_id(i: usize) -> String {
     format!("prompt-{i}")
 }
@@ -392,6 +403,13 @@ pub struct CoShell {
     /// Production safety lock: changing commands on a production server need a second click.
     /// Destructive commands always do. Session only; starts on.
     pub prod_guard: bool,
+    /// The AI face's current expression (see [`crate::ui::face`]).
+    pub face: crate::ui::Face,
+    /// Position in [`GLANCE`].
+    glance_step: usize,
+    /// Seconds into the chat's fold cycle ([`crate::ui_status`]), and when it began / last moved.
+    pub fold: f32,
+    fold_clock: Option<(std::time::Instant, std::time::Instant)>,
 }
 
 /// A draggable divider between panes.
@@ -503,6 +521,13 @@ pub enum Message {
     Stats(TabId, Result<crate::metrics::Stats, String>),
     /// Check whether running block commands are back at a prompt.
     BlockTick,
+    /// The AI face shuts its eyes, then opens them again.
+    FaceBlink,
+    FaceBlinkEnd,
+    /// The working AI face looks the next way.
+    FaceGlance,
+    /// Next frame of the chat's folding status mark.
+    FoldTick,
     /// The pointer is over this block (its actions show).
     BlockHover(Option<usize>),
     /// Ask the AI about one block: (tab, command, output).
@@ -797,6 +822,10 @@ impl CoShell {
             sidebar_tab: SidebarTab::Servers,
             collapsed_groups: Vec::new(),
             prod_guard: true,
+            face: crate::ui::Face::STILL,
+            glance_step: 0,
+            fold: 0.0,
+            fold_clock: None,
             block_hover: None,
             ask: None,
             ask_joined: false,
@@ -1871,6 +1900,30 @@ impl CoShell {
             }
             Message::BlockTick => {
                 self.block_tick();
+                Task::none()
+            }
+            Message::FaceBlink => {
+                self.face.blink = true;
+                // Async block: the timer is made when the task runs, on iced's runtime.
+                Task::perform(async { tokio::time::sleep(BLINK_FOR).await }, |_| Message::FaceBlinkEnd)
+            }
+            Message::FaceBlinkEnd => {
+                self.face.blink = false;
+                Task::none()
+            }
+            Message::FoldTick => {
+                let now = std::time::Instant::now();
+                let start = match self.fold_clock {
+                    Some((start, last)) if now.duration_since(last) < FOLD_RESTART => start,
+                    _ => now,
+                };
+                self.fold_clock = Some((start, now));
+                self.fold = now.duration_since(start).as_secs_f32() % crate::ui_status::CYCLE_SECS;
+                Task::none()
+            }
+            Message::FaceGlance => {
+                self.glance_step = (self.glance_step + 1) % GLANCE.len();
+                self.face.look = GLANCE[self.glance_step];
                 Task::none()
             }
             Message::BlockHover(h) => {
@@ -3132,7 +3185,24 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks])
+        // The face shows on the tab bar's AI button (any open tab) and in the AI panel.
+        let blink = if self.active.is_some() || self.ai.open {
+            iced::time::every(BLINK_EVERY).map(|_| Message::FaceBlink)
+        } else {
+            Subscription::none()
+        };
+        let glance = if self.tabs.iter().any(|t| t.chat.is_streaming()) {
+            iced::time::every(GLANCE_EVERY).map(|_| Message::FaceGlance)
+        } else {
+            Subscription::none()
+        };
+        // The chat shows the active tab's conversation only.
+        let fold = if self.ai.open && self.active_tab().is_some_and(|t| t.chat.is_streaming()) {
+            iced::time::every(FOLD_TICK).map(|_| Message::FoldTick)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold])
     }
 }
 

@@ -29,6 +29,7 @@ mod ui_keys;
 mod ui_servers;
 mod ui_settings;
 mod ui_sidebar;
+mod ui_status;
 mod ui_term;
 mod ui_tunnel;
 mod update;
@@ -108,6 +109,8 @@ fn main() -> iced::Result {
     .subscription(CoShell::subscription)
     .window(window_settings(window))
     .default_font(fonts::SANS)
+    // Smooth edges for canvas shapes (the chat's folding status mark).
+    .antialiasing(true)
     .theme(|_: &CoShell| iced::Theme::Dark)
     // The window background and default text colour. Clear on macOS, where the sidebar is
     // see-through; ours rather than the stock grey elsewhere.

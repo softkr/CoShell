@@ -14,7 +14,8 @@ use crate::app::{CoShell, Message, Phase, Tab, TabId};
 use crate::assist::{self, Risk, Segment};
 use crate::theme::{self, alpha};
 use crate::icons::{CHECK, COPY, PENCIL, SEND, STOP, X, ZAP};
-use crate::ui::{BAR_H, Btn, El, SEMIBOLD, btn, icon_btn, input_style, kbd, mono, muted, rule, tip};
+use crate::ui_status::Mark;
+use crate::ui::{BAR_H, Btn, El, Face, SEMIBOLD, btn, icon_btn, input_style, kbd, mono, muted, rule, tip};
 
 /// The first code block's run button (tests click it by this id).
 pub const RUN_BTN: &str = "ai-run";
@@ -153,7 +154,7 @@ pub fn panel(app: &CoShell) -> El<'_> {
 
     let body: El<'_> = match tab {
         None => container(muted(tr("세션을 열면 해당 서버를 기준으로 답합니다"))).center(Length::Fill).into(),
-        Some(t) => conversation(t, app.prod_guard),
+        Some(t) => conversation(t, app.prod_guard, app.face, app.fold),
     };
     let composer: El<'_> = match tab {
         Some(t) => column![chips(t), composer(app, t)].into(),
@@ -167,16 +168,12 @@ pub fn panel(app: &CoShell) -> El<'_> {
         .into()
 }
 
-const AVATAR: f32 = 24.0;
+/// Height of the assistant's face beside its replies.
+const AVATAR: f32 = 18.0;
 
-/// The assistant's mark: an iridescent ring around a small disc.
-fn ai_avatar<'a>() -> El<'a> {
-    let hole = container(crate::ui::orb(8.0)).center(AVATAR - 3.0).style(|_| container::Style {
-        background: Some(Background::Color(theme::BG_1)),
-        border: Border { radius: 999.0.into(), ..Default::default() },
-        ..Default::default()
-    });
-    iced::widget::stack![crate::ui::orb(AVATAR), container(hole).center(AVATAR)].into()
+/// The assistant's mark beside its replies.
+fn ai_avatar<'a>(face: Face) -> El<'a> {
+    crate::ui::face(AVATAR, face)
 }
 
 /// Message bubble: `bg` fill, thin border, rounded.
@@ -193,20 +190,43 @@ fn bubble<'a>(content: impl Into<El<'a>>, bg: Color) -> El<'a> {
         .into()
 }
 
-fn conversation(tab: &Tab, guard: bool) -> El<'_> {
+/// Space between turns. Replies that follow one another draw their rail line through it.
+const TURN_GAP: f32 = 16.0;
+/// Width of the replies' status rail.
+const RAIL_W: f32 = crate::ui_status::DISC;
+/// Centre of a reply's status mark: level with the first line of its bubble, or with
+/// the working label when the reply has nothing else yet.
+const MARK_Y: f32 = 20.0;
+const MARK_Y_LABEL: f32 = 8.0;
+
+/// `face`: the welcome's expression; `fold`: seconds into the working reply's fold cycle.
+fn conversation(tab: &Tab, guard: bool, face: Face, fold: f32) -> El<'_> {
     let chat = &tab.chat;
     if chat.turns.is_empty() && chat.error.is_none() {
-        return welcome(tab);
+        return welcome(tab, face.idle());
     }
-    let last = chat.turns.len().saturating_sub(1);
-    let mut col = column![].spacing(16).padding(16);
-    for (i, t) in chat.turns.iter().enumerate() {
-        if t.hidden {
-            continue; // a command result fed back to the model; shown on the command itself
-        }
+    // A command result fed back to the model is hidden: it shows on the command itself.
+    let shown: Vec<usize> = (0..chat.turns.len()).filter(|&i| !chat.turns[i].hidden).collect();
+    let newest = shown.iter().rev().copied().find(|&i| chat.turns[i].role == Role::Assistant);
+    let is_reply = |k: Option<usize>| k.and_then(|k| shown.get(k)).is_some_and(|&j| chat.turns[j].role == Role::Assistant);
+    let mut col = column![].padding(16);
+    for (k, &i) in shown.iter().enumerate() {
+        let t = &chat.turns[i];
+        let gap = if k + 1 < shown.len() || chat.error.is_some() { TURN_GAP } else { 0.0 };
         col = col.push(match t.role {
-            Role::User => user_turn(t),
-            Role::Assistant => assistant_turn(tab, i, t, i == last && chat.is_streaming() && t.execs.is_empty(), guard),
+            Role::User => container(user_turn(t)).padding(Padding { bottom: gap, ..Padding::ZERO }).into(),
+            Role::Assistant => {
+                let working = newest == Some(i) && chat.is_streaming();
+                let thinking = t.text.trim().is_empty() && !t.execs.iter().any(|e| e.state == ExecState::Running);
+                let mark = match (newest == Some(i), working) {
+                    (_, true) if thinking => Mark::Thinking(fold),
+                    (_, true) => Mark::Working(fold),
+                    (true, false) => Mark::Latest,
+                    (false, _) => Mark::Past,
+                };
+                let rail = Rail { mark, mark_y: MARK_Y, joined_above: is_reply(k.checked_sub(1)), joined_below: is_reply(Some(k + 1)) };
+                assistant_turn(tab, i, t, working.then_some(fold), guard, rail, gap)
+            }
         });
     }
     if let Some(e) = &chat.error {
@@ -215,7 +235,44 @@ fn conversation(tab: &Tab, guard: bool) -> El<'_> {
     scrollable(col).anchor_bottom().height(Length::Fill).into()
 }
 
-fn welcome(tab: &Tab) -> El<'_> {
+/// A reply's status mark, and whether a line joins it to the reply before / after it.
+struct Rail {
+    mark: Mark,
+    /// Centre of the mark below the turn's top.
+    mark_y: f32,
+    joined_above: bool,
+    joined_below: bool,
+}
+
+fn rail<'a>(r: Rail) -> El<'a> {
+    let line = |height: Length, on: bool| -> El<'a> {
+        container(Space::new()).width(1).height(height).style(crate::ui::fill(if on { theme::LINE_2 } else { Color::TRANSPARENT })).into()
+    };
+    let above = (r.mark_y - crate::ui_status::DISC / 2.0).max(0.0);
+    column![line(Length::Fixed(above), r.joined_above), crate::ui_status::mark(r.mark), line(Length::Fill, r.joined_below)]
+        .width(RAIL_W)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .into()
+}
+
+/// What the working reply is doing, with dots that count up as the fold turns.
+fn working_label<'a>(t: &Turn, fold: f32) -> El<'a> {
+    let doing = if t.execs.iter().any(|e| e.state == ExecState::Running) {
+        tr("명령 실행 중")
+    } else if t.text.trim().is_empty() {
+        tr("생각 중")
+    } else {
+        tr("답변 작성 중")
+    };
+    let dots = ".".repeat(1 + (fold / WORKING_DOT_SECS) as usize % 3);
+    text(format!("{doing}{dots}")).size(12).font(SEMIBOLD).color(theme::ACCENT_TX).into()
+}
+
+/// How long each of the working label's dots lasts.
+const WORKING_DOT_SECS: f32 = 0.45;
+
+fn welcome(tab: &Tab, face: Face) -> El<'_> {
     let id = tab.id;
     let suggestions: &[(&str, bool)] = if tab.is_local() {
         &[(tr("마지막 출력에서 문제를 찾아줘"), true), (tr("이 폴더에서 용량 큰 파일 찾는 명령"), false)]
@@ -223,7 +280,7 @@ fn welcome(tab: &Tab) -> El<'_> {
         &[(tr("마지막 출력에서 문제를 찾아줘"), true), (tr("디스크를 많이 쓰는 디렉터리 찾는 명령"), false), (tr("최근 1시간 에러 로그 보는 명령"), false)]
     };
     let mut col = column![
-        ai_avatar(),
+        ai_avatar(face),
         Space::new().height(6),
         text(tf("{0}에 대해 물어보세요", &[&tab.display_name()])).size(13).font(SEMIBOLD).color(theme::SLATE_100),
         muted(tr("터미널 출력은 직접 첨부할 때만 전송됩니다")),
@@ -530,7 +587,8 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a>
     col.into()
 }
 
-fn assistant_turn<'a>(tab: &'a Tab, index: usize, t: &'a Turn, streaming: bool, guard: bool) -> El<'a> {
+/// `working`: seconds into the fold cycle while this reply is being worked on.
+fn assistant_turn<'a>(tab: &'a Tab, index: usize, t: &'a Turn, working: Option<f32>, guard: bool, rail_: Rail, gap: f32) -> El<'a> {
     // The design: one bubble with the reply, then a card per command.
     let mut prose_text: Vec<String> = Vec::new();
     let mut cards: Vec<El<'a>> = Vec::new();
@@ -555,35 +613,23 @@ fn assistant_turn<'a>(tab: &'a Tab, index: usize, t: &'a Turn, streaming: bool, 
     if !prose_text.is_empty() {
         col = col.push(bubble(prose(&prose_text.join("\n\n")), theme::CARD));
     }
-    if streaming && t.text.trim().is_empty() {
-        col = col.push(
-            container(
-                row![
-                    crate::ui::dot(theme::ACCENT_TX, 8.0),
-                    crate::ui::dot(alpha(theme::ACCENT_TX, 0.75), 8.0),
-                    crate::ui::dot(alpha(theme::ACCENT_TX, 0.5), 8.0),
-                    text(tr("서버 상태 분석 중...")).size(12).color(theme::TEXT_2),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            )
-            .padding([12, 14])
-            .style(|_| container::Style {
-                background: Some(Background::Color(alpha(theme::BG_2, 0.6))),
-                border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_CARD.into() },
-                ..Default::default()
-            }),
-        );
-    } else if streaming {
-        col = col.push(text("▍").size(12).color(theme::ACCENT_TX));
-    }
+    let cards_empty = cards.is_empty();
     for c in cards {
         col = col.push(c);
     }
     if t.stopped {
         col = col.push(muted(tr("응답을 중지했습니다")));
     }
-    row![ai_avatar(), col.width(Length::Fill)].spacing(10).into()
+    let mut rail_ = rail_;
+    if let Some(fold) = working {
+        if prose_text.is_empty() && cards_empty && !t.stopped {
+            rail_.mark_y = MARK_Y_LABEL;
+        }
+        col = col.push(working_label(t, fold));
+    }
+    // The rail lies over the turn's left gutter, as tall as the turn and its gap.
+    let body = row![Space::new().width(RAIL_W), col.width(Length::Fill)].spacing(10).padding(Padding { bottom: gap, ..Padding::ZERO });
+    iced::widget::stack![body, rail(rail_)].into()
 }
 
 /// 주의 / 위험 tag on a command card (read-only commands get none).
