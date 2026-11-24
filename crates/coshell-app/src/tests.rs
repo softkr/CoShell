@@ -2547,3 +2547,65 @@ fn trailing_space_at_the_prompt_is_kept() {
     feed(&app, id, b"\x1b[3D");
     assert_eq!(typed(&app).as_deref(), Some("sudo"));
 }
+
+#[test]
+fn block_output_can_be_selected_and_copied() {
+    use crate::blocks::Sig;
+    use iced::keyboard::{self, Key, Modifiers, key};
+    use iced::{Event, Point, mouse};
+    let mut app = app();
+    let id = app.open_local();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    feed(
+        &app,
+        id,
+        b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ sudo apt upgrade -y\r\nReading package lists... Done\r\nAll packages are up to date.\r\nops@app-01:~$ ",
+    );
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().sig = Some(Sig::UserHost("ops@app-01".into()));
+    assert!(app.screen_of(app.tabs.iter().find(|t| t.id == id).unwrap()).is_some(), "block view");
+
+    let mut ui = simulator(ui::view(&app));
+    let first = ui.find("Reading package lists... Done").expect("first output line is text").bounds();
+    let second = ui.find("All packages are up to date.").expect("second output line is text").bounds();
+    let press = || Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = || Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let copy = || {
+        let modifiers = if cfg!(target_os = "macos") { Modifiers::LOGO } else { Modifiers::CTRL | Modifiers::SHIFT };
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Character("c".into()),
+            modified_key: Key::Character("c".into()),
+            physical_key: key::Physical::Code(key::Code::KeyC),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    };
+    let copied = |ui: iced_test::Simulator<'_, Message>| -> Vec<String> {
+        ui.into_messages().filter_map(|m| if let Message::AiCopy(t) = m { Some(t) } else { None }).collect()
+    };
+
+    // Nothing selected: ⌘C is left for the terminal.
+    let mut idle = simulator(ui::view(&app));
+    idle.simulate([copy()]);
+    assert!(copied(idle).is_empty());
+
+    // Drag from the start of "package" on the first line past the end of the second.
+    let start = Point::new(first.x + "Reading ".len() as f32 * (first.width / "Reading package lists... Done".len() as f32) + 1.0, first.center_y());
+    let end = Point::new(second.x + second.width + 40.0, second.center_y());
+    ui.point_at(start);
+    ui.simulate([press()]);
+    ui.point_at(end);
+    ui.simulate([Event::Mouse(mouse::Event::CursorMoved { position: end }), release()]);
+    assert_eq!(ui.simulate([copy()]), vec![iced::event::Status::Captured]);
+    assert_eq!(copied(ui), vec!["package lists... Done\nAll packages are up to date.".to_string()]);
+
+    // A double click takes the word under the pointer.
+    let mut ui = simulator(ui::view(&app));
+    let second = ui.find("All packages are up to date.").expect("line").bounds();
+    let word = Point::new(second.x + "All pa".len() as f32 * (second.width / "All packages are up to date.".len() as f32), second.center_y());
+    ui.point_at(word);
+    ui.simulate([press(), release(), press(), release()]);
+    ui.simulate([copy()]);
+    assert_eq!(copied(ui), vec!["packages".to_string()]);
+}

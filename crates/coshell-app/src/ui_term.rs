@@ -3,13 +3,14 @@
 //! terminal stays underneath and keeps the keyboard.
 
 use crate::i18n::{tf, tr};
-use iced::widget::text::{LineHeight, Span};
-use iced::widget::{Space, button, column, container, mouse_area, rich_text, row, span, text, text_input};
+use iced::widget::text::Span;
+use iced::widget::{Space, button, column, container, mouse_area, row, span, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
 use crate::app::{ASK_INPUT, CoShell, Message, RUN_INPUT, SEARCH_INPUT, Tab};
 use crate::blocks::{self, Block, Mark, Prompt, Screen, Source};
 use crate::fonts::MONO;
+use crate::selectable::Selectable;
 use crate::icons::{COPY, SEARCH, SEND, X};
 use crate::theme::{self, alpha};
 use crate::ui::{El, kbd, mono};
@@ -54,25 +55,32 @@ fn prompt_parts<'a>(p: &Prompt) -> Vec<El<'a>> {
     parts
 }
 
+/// Command output, selectable and copyable (⌘C) like the terminal underneath.
 fn output_text<'a>(lines: &[String], query: &str) -> El<'a> {
     let body = lines.join("\n");
-    let spans: Vec<Span<'a, (), Font>> = blocks::highlight(body.trim_end(), query)
-        .into_iter()
-        .map(|(s, m)| {
-            let sp = span(s);
-            match m {
+    let mut rows: Vec<Vec<Span<'a, (), Font>>> = vec![Vec::new()];
+    for (s, m) in blocks::highlight(body.trim_end(), query) {
+        for (k, part) in s.split('\n').enumerate() {
+            if k > 0 {
+                rows.push(Vec::new());
+            }
+            if part.is_empty() {
+                continue;
+            }
+            let sp = span(part.to_string());
+            let sp = match m {
                 Mark::Plain => sp.color(alpha(theme::TEXT, 0.9)),
                 Mark::High | Mark::Warn => sp.color(theme::WARN).font(MONO_SEMIBOLD),
                 Mark::Err => sp.color(theme::ERR_TX).font(MONO_SEMIBOLD),
                 Mark::Ok => sp.color(theme::OK).font(MONO_MEDIUM),
                 Mark::Path => sp.color(theme::INFO),
                 Mark::Found => sp.color(theme::AMBER_200).background(alpha(theme::WARN, 0.3)),
-            }
-        })
-        .collect();
-    container(rich_text(spans).font(MONO).size(TEXT).line_height(LineHeight::Absolute(OUTPUT_LINE_H.into())))
-        .padding(Padding::ZERO.left(4.0))
-        .into()
+            };
+            rows.last_mut().expect("one row").push(sp);
+        }
+    }
+    let out = Selectable::new(rows, Message::AiCopy).font(MONO).size(TEXT).line_height(OUTPUT_LINE_H).selection(alpha(theme::ACCENT, 0.35));
+    container(out).padding(Padding::ZERO.left(4.0)).into()
 }
 
 fn small_btn<'a>(content: impl Into<El<'a>>, msg: Message) -> El<'a> {

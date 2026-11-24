@@ -21,6 +21,7 @@ mod keys;
 mod launch;
 #[cfg(target_os = "macos")]
 mod menu;
+mod selectable;
 mod settings;
 mod terminal;
 mod theme;
