@@ -13,6 +13,7 @@ mod hostkey;
 pub mod keys;
 pub use exec::ExecOutput;
 mod prompt;
+mod sftp;
 mod shell;
 
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ pub use prompt::{
     BoxFuture, HostKeyDecision, HostKeyKind, HostKeyQuery, InteractivePrompt, InteractiveQuery, Progress, Prompter,
 };
 pub use forward::{ForwardSpec, Tunnel, TunnelStats};
+pub use sftp::{FileEntry, FileKind, Sftp, TransferProgress};
 pub use shell::{SshTransport, open_shell};
 
 /// Default SSH port.
@@ -138,6 +140,8 @@ pub enum SshError {
     Timeout(String),
     Ssh { hop: String, source: russh::Error },
     Forward(String),
+    /// File transfer (SFTP) failed; the text says what and why.
+    Sftp(String),
     PortInUse(u16),
     EmptyChain,
 }
@@ -162,6 +166,7 @@ impl std::fmt::Display for SshError {
                 Self::Timeout(hop) => write!(f, "{hop}: connection timed out"),
                 Self::Ssh { hop, source } => write!(f, "{hop}: {source}"),
                 Self::Forward(e) => write!(f, "Forwarding failed: {e}"),
+                Self::Sftp(e) => write!(f, "File transfer failed: {e}"),
                 Self::PortInUse(port) => write!(f, "Port {port} on this PC is already in use"),
                 Self::EmptyChain => write!(f, "Empty connection route"),
             };
@@ -183,6 +188,7 @@ impl std::fmt::Display for SshError {
             Self::Timeout(hop) => write!(f, "{hop}: 연결 시간 초과"),
             Self::Ssh { hop, source } => write!(f, "{hop}: {source}"),
             Self::Forward(e) => write!(f, "포워딩 실패: {e}"),
+            Self::Sftp(e) => write!(f, "파일 전송 실패: {e}"),
             Self::PortInUse(port) => write!(f, "이 PC의 {port}번 포트는 이미 사용 중입니다"),
             Self::EmptyChain => write!(f, "빈 연결 경로"),
         }

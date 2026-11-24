@@ -378,6 +378,11 @@ pub fn view(app: &CoShell) -> El<'_> {
     if let Some(alias) = &app.delete_confirm {
         layers.push(modal(delete_dialog(app, alias)));
     }
+    if let Some(tab) = app.active_tab()
+        && let Some(c) = &tab.files.confirm
+    {
+        layers.push(modal(crate::ui_files::confirm_dialog(tab, c)));
+    }
     if app.palette.is_some() {
         layers.push(palette(app));
     }
@@ -788,6 +793,10 @@ fn status_bar(app: &CoShell) -> El<'_> {
                         content = content.push(text(tf("오류 {0}", &[&failed])).size(11).color(theme::ERR));
                     }
                     left.push(button(content).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::TunnelPanel).into());
+                }
+                // Files on their way, whichever sidebar page is showing.
+                if t.files.running() > 0 {
+                    left.push(small(tf("파일 전송 중 {0}", &[&t.files.running()]), theme::ACCENT_TX));
                 }
             }
             if !t.is_local() {

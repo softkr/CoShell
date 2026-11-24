@@ -561,6 +561,144 @@ fn long_tab_name_keeps_its_close_button() {
     }
 }
 
+fn file(name: &str, kind: coshell_ssh::FileKind, size: u64) -> coshell_ssh::FileEntry {
+    coshell_ssh::FileEntry { name: name.into(), kind, link: false, size, modified: Some(1_700_000_000), permissions: Some(0o644) }
+}
+
+/// An SSH tab whose file panel shows `/srv/app`.
+fn app_with_files() -> (CoShell, crate::app::TabId) {
+    use coshell_ssh::FileKind::{Dir, File};
+    let mut app = app();
+    app.ai.open = false;
+    let id = app.open_fake_ssh("web-01", &["ops@web-01"], &[]);
+    let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Files));
+    let entries = vec![file("logs", Dir, 0), file("releases", Dir, 0), file("app.conf", File, 812), file("backup.tar.gz", File, 48_300_000)];
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().files = crate::files::Files::fake("/srv/app", entries);
+    (app, id)
+}
+
+#[test]
+fn file_panel_explains_itself_until_a_server_is_connected() {
+    let mut app = app();
+    let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Files));
+    simulator(ui::view(&app)).find("SSH 서버에 접속하면 파일을 볼 수 있습니다").expect("no tab");
+    app.open_local();
+    simulator(ui::view(&app)).find("로컬 셸에는 파일 패널이 없습니다. SSH 탭에서 사용하세요.").expect("local tab");
+    app.open_fake_ssh("web-01", &["ops@web-01"], &[]);
+    simulator(ui::view(&app)).find("서버에 연결되면 파일이 표시됩니다").expect("still connecting");
+}
+
+#[test]
+fn file_panel_lists_the_folder_and_offers_actions() {
+    use crate::files::FilesMsg;
+    let (mut app, id) = app_with_files();
+    {
+        let mut ui = simulator(ui::view(&app));
+        for t in ["/srv/app", "logs", "app.conf", "812 B", "46.1 MB", "터미널 따라가기"] {
+            ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
+        }
+        assert!(ui.find("다운로드").is_err(), "actions wait for a file to be picked");
+    }
+    let _ = app.update(Message::Files(id, FilesMsg::Select("app.conf".into())));
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("다운로드").expect("download");
+        ui.find("편집").expect("edit");
+    }
+    // Right click: the destructive items are there, and Esc closes the menu.
+    let _ = app.update(Message::Files(id, FilesMsg::Menu(Some("logs".into()))));
+    {
+        let mut ui = simulator(ui::view(&app));
+        for t in ["열기", "이름 변경", "권한 변경", "삭제"] {
+            ui.find(t).unwrap_or_else(|_| panic!("menu: {t} missing"));
+        }
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("file-panel"));
+        }
+    }
+    let _ = app.update(Message::Files(id, FilesMsg::Dismiss));
+    assert!(app.tabs[0].files.menu.is_none());
+}
+
+#[test]
+fn file_panel_checks_names_and_asks_before_anything_is_lost() {
+    use crate::files::{FileConfirm, FileInput, FilesMsg};
+    let (mut app, id) = app_with_files();
+    fn files(app: &CoShell) -> &crate::files::Files {
+        &app.tabs[0].files
+    }
+
+    // A name with a slash never reaches the server.
+    let _ = app.update(Message::Files(id, FilesMsg::NewFolder));
+    let _ = app.update(Message::Files(id, FilesMsg::InputChanged("a/b".into())));
+    let _ = app.update(Message::Files(id, FilesMsg::InputSubmit));
+    assert!(files(&app).error.is_some() && files(&app).input.is_some(), "kept open with the reason");
+    let _ = app.update(Message::Files(id, FilesMsg::InputChanged("assets".into())));
+    let _ = app.update(Message::Files(id, FilesMsg::InputSubmit));
+    assert!(files(&app).error.is_none() && files(&app).input.is_none());
+
+    // Permissions start from the current ones and must be octal.
+    let _ = app.update(Message::Files(id, FilesMsg::ChmodAsk("app.conf".into())));
+    assert_eq!(files(&app).input, Some(FileInput::Chmod { name: "app.conf".into(), mode: "644".into() }));
+    let _ = app.update(Message::Files(id, FilesMsg::InputChanged("rwx".into())));
+    let _ = app.update(Message::Files(id, FilesMsg::InputSubmit));
+    assert!(files(&app).error.is_some());
+    let _ = app.update(Message::Files(id, FilesMsg::InputCancel));
+
+    // Deleting a folder says what goes with it.
+    let _ = app.update(Message::Files(id, FilesMsg::DeleteAsk("logs".into())));
+    assert_eq!(files(&app).confirm, Some(FileConfirm::Delete { name: "logs".into(), folder: true }));
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("logs 폴더를 삭제할까요?").expect("asks first");
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("file-delete"));
+        }
+    }
+    let _ = app.update(Message::Shortcut(crate::app::Shortcut::Escape));
+    assert!(files(&app).confirm.is_none(), "Esc cancels");
+
+    // An upload over an existing name waits for a yes; a new name does not ask.
+    let _ = app.update(Message::Files(id, FilesMsg::UploadPicked(vec!["/tmp/app.conf".into(), "/tmp/new.txt".into()])));
+    assert!(matches!(files(&app).confirm, Some(FileConfirm::Overwrite(_))));
+    simulator(ui::view(&app)).find("같은 이름의 파일을 덮어쓸까요?").expect("asks first");
+    let _ = app.update(Message::Files(id, FilesMsg::ConfirmNo));
+    let _ = app.update(Message::Files(id, FilesMsg::UploadPicked(vec!["/tmp/new.txt".into()])));
+    assert!(files(&app).confirm.is_none());
+}
+
+#[test]
+fn transfers_show_in_the_panel_and_the_status_bar() {
+    use crate::files::{FilesMsg, TransferState};
+    let (mut app, id) = app_with_files();
+    {
+        let f = &mut app.tabs[0].files;
+        f.fake_transfer("backup.tar.gz", false, TransferState::Running);
+        f.fake_transfer("app.conf", true, TransferState::Done);
+        f.fake_transfer("big.iso", true, TransferState::Failed("권한이 없습니다".into()));
+    }
+    {
+        let mut ui = simulator(ui::view(&app));
+        for t in ["전송", "backup.tar.gz", "0%", "완료", "실패", "권한이 없습니다", "파일 전송 중 1"] {
+            ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
+        }
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("file-transfers"));
+        }
+    }
+    // The indicator is there on the other sidebar pages too.
+    let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Servers));
+    simulator(ui::view(&app)).find("파일 전송 중 1").expect("status bar");
+    // Clearing keeps what is still running.
+    let _ = app.update(Message::Files(id, FilesMsg::TransfersClear));
+    assert_eq!(app.tabs[0].files.transfers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["backup.tar.gz"]);
+    // Losing the connection stops transfers and forgets the listing, not the preference.
+    app.tabs[0].files.follow = true;
+    app.tabs[0].files.reset();
+    let f = &app.tabs[0].files;
+    assert!(f.follow && f.transfers.is_empty() && f.entries.is_empty() && f.link == crate::files::Link::Idle);
+}
+
 #[test]
 fn new_server_dialog_copy() {
     let mut app = app();

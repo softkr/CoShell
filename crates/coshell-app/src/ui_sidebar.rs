@@ -38,6 +38,11 @@ pub fn sidebar(app: &CoShell) -> El<'_> {
     let content: El<'_> = match app.sidebar_tab {
         SidebarTab::Servers => servers(app),
         SidebarTab::Snippets => snippets(app),
+        // The file panel has its own path bar instead of the search field.
+        SidebarTab::Files => {
+            let col = column![head(app), container(crate::ui_files::panel(app)).height(Length::Fill), crate::ui::rule(true), footer(app)];
+            return container(col).width(app.settings.sidebar_width).height(Length::Fill).style(fill(theme::SIDEBAR)).into();
+        }
     };
     // The search field is always there, like Finder's.
     let field = text_input(tr("호스트명, IP 검색..."), &app.host_filter)
@@ -82,7 +87,7 @@ fn head(app: &CoShell) -> El<'_> {
                 ..Default::default()
             })
     };
-    let switch = container(row![seg("서버", SidebarTab::Servers), seg("스니펫", SidebarTab::Snippets)]).padding(2).width(Length::Fill).style(|_| container::Style {
+    let switch = container(row![seg("서버", SidebarTab::Servers), seg("스니펫", SidebarTab::Snippets), seg("파일", SidebarTab::Files)]).padding(2).width(Length::Fill).style(|_| container::Style {
         background: Some(Background::Color(alpha(Color::WHITE, 0.07))),
         border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_ROW.into() },
         ..Default::default()

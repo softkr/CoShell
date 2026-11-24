@@ -1,6 +1,8 @@
 //! In-process russh servers and helpers shared by the integration tests.
 #![allow(dead_code)]
 
+pub mod sftp_server;
+
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;

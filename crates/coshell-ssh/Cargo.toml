@@ -8,6 +8,7 @@ description = "SSH jump-chain transport (russh) for CoShell terminal sessions"
 [dependencies]
 coshell-term = { path = "../coshell-term" }
 russh.workspace = true
+russh-sftp.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 

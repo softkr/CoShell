@@ -20,6 +20,7 @@ use crate::ai::{AI_INPUT, Ai, Attachment, Chat, Exec, ExecState, Turn};
 use crate::settings::{self, CursorKind, Scheme, Settings};
 use crate::assist;
 use crate::conn::{self, Answers, ConnEvent, Once};
+use crate::files::FilesMsg;
 use crate::hosts::{Env, HostDef, HostStore, slugify};
 use coshell_ai::{AiError, Format, Keychain, Role, SecretStore, StreamEvent};
 use iced::widget::text_editor;
@@ -55,6 +56,12 @@ const AGENT_WATCH_ROWS: usize = 600;
 const PERSIST_DELAY: Duration = Duration::from_secs(2);
 /// How often running block commands are checked for being done.
 const BLOCK_TICK: Duration = Duration::from_millis(100);
+/// How often transfer progress is redrawn.
+const TRANSFER_TICK: Duration = Duration::from_millis(150);
+/// How often files open in a local editor are checked for saves.
+const EDIT_SCAN_EVERY: Duration = Duration::from_secs(2);
+/// How often the file panel looks at the terminal's folder while following it.
+const FOLLOW_EVERY: Duration = Duration::from_secs(1);
 /// The AI's face blinks this often, with its eyes shut for `BLINK_FOR`.
 const BLINK_EVERY: Duration = Duration::from_millis(4200);
 const BLINK_FOR: Duration = Duration::from_millis(140);
@@ -215,6 +222,8 @@ pub struct Tab {
     pub sig: Option<crate::blocks::Sig>,
     /// Live resource figures (CPU, memory, disk) and the server's OS, polled while connected.
     pub stats: Option<crate::metrics::Stats>,
+    /// Remote files (SFTP), opened when the file panel is first shown for this tab.
+    pub files: crate::files::Files,
 }
 
 impl Tab {
@@ -435,6 +444,8 @@ pub enum SidebarTab {
     #[default]
     Servers,
     Snippets,
+    /// Remote files of the active SSH tab.
+    Files,
 }
 
 pub struct HostEditor {
@@ -653,6 +664,10 @@ pub enum Message {
     HostField(HostField, String),
     HostEnv(Env),
     HostForwardRemove(usize),
+    /// The file panel of a tab.
+    Files(TabId, crate::files::FilesMsg),
+    /// A file dragged onto the window.
+    FileDropped(PathBuf),
     /// Jump chain: pick server `alias` for hop `i` (`i == len` appends).
     HostJumpPick(usize, String),
     /// Insert an empty hop after hop `i`.
@@ -950,6 +965,7 @@ impl CoShell {
             metas: Vec::new(),
             sig: None,
             stats: None,
+            files: crate::files::Files::default(),
             spec: Some((vec![host], app_opts(PathBuf::from("/nonexistent")))),
         });
         self.active = Some(id);
@@ -1479,6 +1495,7 @@ impl CoShell {
             metas: Vec::new(),
             sig: None,
             stats: None,
+            files: crate::files::Files::default(),
             spec: None,
         });
         self.active = Some(id);
@@ -1515,6 +1532,7 @@ impl CoShell {
             metas: Vec::new(),
             sig: None,
             stats: None,
+            files: crate::files::Files::default(),
             spec: Some((chain, opts)),
         });
         self.active = Some(id);
@@ -1530,6 +1548,7 @@ impl CoShell {
         tab.exited = false;
         tab.prompt = None;
         tab.conn = None;
+        tab.files.reset();
         tab.tunnels.clear();
         tab.save_passwords.clear();
         let (events, driver) = conn::connect(chain, opts, self.passwords.clone());
@@ -1649,8 +1668,16 @@ impl CoShell {
     // ------------------------------------------------------------ update
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        // Whatever just happened may have put a connected tab's file panel on screen.
+        Task::batch([task, self.ensure_files()])
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Conn(id, ev) => self.on_conn(id, ev),
+            Message::Files(id, m) => self.update_files(id, m),
+            Message::FileDropped(path) => self.drop_file(path),
             Message::Term(id, ev) => {
                 if let Some(tab) = self.tab_mut(id) {
                     match ev {
@@ -1672,6 +1699,7 @@ impl CoShell {
                             // The connection is gone with the shell; so are its forwards.
                             tab.tunnels.clear();
                             tab.conn = None;
+                            tab.files.reset();
                         }
                     }
                 }
@@ -2889,6 +2917,10 @@ impl CoShell {
                 Task::none()
             }
             Shortcut::Settings => self.update(if self.settings_draft.is_some() { Message::SettingsClose } else { Message::SettingsOpen }),
+            Shortcut::Escape if self.active_tab().is_some_and(|t| t.files.has_popup()) => match self.active {
+                Some(id) => self.update(Message::Files(id, FilesMsg::Dismiss)),
+                None => Task::none(),
+            },
             Shortcut::Escape if self.host_menu.is_some() => self.update(Message::HostMenu(None)),
             Shortcut::Escape if self.delete_confirm.is_some() => self.update(Message::HostDeleteCancel),
             Shortcut::Escape if self.update_confirm => self.update(Message::UpdateCancel),
@@ -3289,7 +3321,20 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold])
+        // Progress bars move while bytes do.
+        let transfers = Subscription::batch(
+            self.tabs.iter().filter(|t| t.files.running() > 0).map(|t| iced::time::every(TRANSFER_TICK).with(t.id).map(|(id, _)| Message::Files(id, FilesMsg::Tick))),
+        );
+        let edits = Subscription::batch(
+            self.tabs.iter().filter(|t| !t.files.edits.is_empty()).map(|t| iced::time::every(EDIT_SCAN_EVERY).with(t.id).map(|(id, _)| Message::Files(id, FilesMsg::EditScan))),
+        );
+        let follow = match self.active_tab() {
+            Some(t) if self.sidebar_tab == SidebarTab::Files && t.files.follow && t.files.link == crate::files::Link::Ready => {
+                iced::time::every(FOLLOW_EVERY).with(t.id).map(|(id, _)| Message::Files(id, FilesMsg::FollowTick))
+            }
+            _ => Subscription::none(),
+        };
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow])
     }
 }
 
@@ -3311,6 +3356,7 @@ fn on_divider_drag(ev: Event, _status: event::Status, _window: window::Id) -> Op
 fn on_event(ev: Event, _status: event::Status, _window: window::Id) -> Option<Message> {
     let (key, modifiers, physical_key) = match ev {
         Event::Window(window::Event::Resized(size)) => return Some(Message::WindowResized(size)),
+        Event::Window(window::Event::FileDropped(path)) => return Some(Message::FileDropped(path)),
         Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) => (key, modifiers, physical_key),
         _ => return None,
     };
