@@ -334,13 +334,13 @@ fn host_editor_saves_definition_and_tags() {
     // New CoShell host jumping through an ~/.ssh/config host.
     let _ = app.update(Message::PalettePick(crate::app::PaletteItem::NewHost));
     for (f, v) in [
-        (HostField::Alias, "prod-web"),
+        (HostField::Name, "prod-web"),
         (HostField::HostName, "10.0.1.42"),
         (HostField::User, "ubuntu"),
-        (HostField::ProxyJump, "bastion"),
     ] {
         let _ = app.update(Message::HostField(f, v.into()));
     }
+    let _ = app.update(Message::HostJumpPick(0, "bastion".into()));
     let _ = app.update(Message::HostEnv(Env::Prod));
     // Built from blocks: purpose, then ports.
     let _ = app.update(Message::TunnelKind('L'));
@@ -373,18 +373,22 @@ fn host_editor_saves_definition_and_tags() {
 }
 
 #[test]
-fn host_editor_rejects_injection_and_alias_clash() {
-    let mut app = app_with("Host bastion\n HostName 1.2.3.4\n", HostStore::default(), None, ai_with("ollama", &[]));
+fn host_editor_rejects_injection_and_avoids_config_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts.toml");
+    let mut app = app_with("Host bastion\n HostName 1.2.3.4\n", HostStore::default(), Some(path.clone()), ai_with("ollama", &[]));
     let _ = app.update(Message::PalettePick(crate::app::PaletteItem::NewHost));
-    let _ = app.update(Message::HostField(HostField::Alias, "x".into()));
+    let _ = app.update(Message::HostField(HostField::Name, "bastion".into()));
     let _ = app.update(Message::HostField(HostField::HostName, "1.1.1.1 ProxyCommand=evil".into()));
     let _ = app.update(Message::HostSave(false));
     assert!(app.editor.as_ref().and_then(|e| e.error.clone()).is_some_and(|e| e.contains("주소")));
 
+    // A name matching an ~/.ssh/config host gets its own alias instead of shadowing it.
     let _ = app.update(Message::HostField(HostField::HostName, "1.1.1.1".into()));
-    let _ = app.update(Message::HostField(HostField::Alias, "bastion".into()));
     let _ = app.update(Message::HostSave(false));
-    assert!(app.editor.as_ref().and_then(|e| e.error.clone()).is_some_and(|e| e.contains("~/.ssh/config")));
+    assert!(app.editor.is_none(), "saved: {:?}", app.editor.as_ref().and_then(|e| e.error.clone()));
+    let saved = HostStore::load(&path).unwrap();
+    assert_eq!(saved.hosts.iter().map(|h| (h.alias.as_str(), h.display())).collect::<Vec<_>>(), [("bastion-2", "bastion")]);
 }
 
 #[test]
@@ -413,7 +417,7 @@ fn add_server(app: &mut CoShell, group: Option<&str>, name: &str, target: &str, 
         let _ = app.update(Message::HostField(HostField::Port, p.into()));
     }
     if let Some(j) = jump {
-        let _ = app.update(Message::HostField(HostField::ProxyJump, j.into()));
+        let _ = app.update(Message::HostJumpPick(0, j.into()));
     }
     let _ = app.update(Message::HostField(HostField::Name, name.into()));
     let _ = app.update(Message::HostSave(false));
@@ -451,6 +455,55 @@ fn servers_added_with_groups_and_jump() {
     drop(ui);
     let _ = app.update(Message::HostView);
     assert!(app.host_view);
+}
+
+#[test]
+fn jump_chain_takes_several_servers_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hosts.toml");
+    let mut app = app_with("", HostStore::default(), Some(path.clone()), ai_with("ollama", &[]));
+    add_server(&mut app, None, "jumphost 서버", "root@203.0.113.83", None);
+    add_server(&mut app, None, "console", "ops@10.0.0.2", None);
+
+    let _ = app.update(Message::HostNewIn(None));
+    let _ = app.update(Message::HostField(HostField::Name, "테스트 서버".into()));
+    let _ = app.update(Message::HostField(HostField::HostName, "10.0.0.7".into()));
+    let _ = app.update(Message::HostTab(crate::app::HostTab::Jump));
+    {
+        let mut ui = simulator(ui::view(&app));
+        assert!(ui.find("ssh 별칭").is_err(), "alias is not asked for");
+        ui.find("경유 서버").expect("jump section");
+    }
+    let _ = app.update(Message::HostJumpPick(0, "jumphost".into()));
+    let _ = app.update(Message::HostJumpAdd(0));
+    // An unpicked hop is not part of the route.
+    assert_eq!(app.editor.as_ref().unwrap().def.proxy_jump.as_deref(), Some("jumphost"));
+    let _ = app.update(Message::HostJumpPick(1, "console".into()));
+    {
+        let mut ui = simulator(ui::view(&app));
+        for t in ["jumphost 서버", "console", "테스트 서버"] {
+            ui.find(t).unwrap_or_else(|_| panic!("{t} missing from the chain"));
+        }
+        assert!(ui.find("host-2").is_err(), "aliases stay hidden");
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("jump-chain"));
+        }
+    }
+    let _ = app.update(Message::HostSave(false));
+    assert!(app.editor.is_none(), "saved: {:?}", app.editor.as_ref().and_then(|e| e.error.clone()));
+    let saved = HostStore::load(&path).unwrap();
+    let alias = saved.hosts.iter().find(|h| h.display() == "테스트 서버").unwrap().alias.clone();
+    assert_eq!(saved.get(&alias).unwrap().proxy_jump.as_deref(), Some("jumphost,console"));
+    let cfg = coshell_ssh::config::SshConfig::parse(&saved.to_ssh_config(), Path::new("/h"));
+    let chain = cfg.resolve(&alias, "me").unwrap();
+    assert_eq!(chain.iter().map(|h| h.host.as_str()).collect::<Vec<_>>(), ["203.0.113.83", "10.0.0.2", "10.0.0.7"]);
+
+    // Removing the first hop keeps the rest in order.
+    let _ = app.update(Message::HostEdit(alias.clone()));
+    assert_eq!(app.editor.as_ref().unwrap().jumps, ["jumphost", "console"]);
+    let _ = app.update(Message::HostJumpRemove(0));
+    let _ = app.update(Message::HostSave(false));
+    assert_eq!(HostStore::load(&path).unwrap().get(&alias).unwrap().proxy_jump.as_deref(), Some("console"));
 }
 
 #[test]
@@ -497,23 +550,41 @@ fn server_page_groups_cards_and_actions() {
 }
 
 #[test]
+fn long_tab_name_keeps_its_close_button() {
+    let mut app = app();
+    app.ai.open = false;
+    app.open_local();
+    app.open_fake_ssh("root@hli-ncp-dev-srv-test-very-long-hostname-01", &["root@hli-ncp-dev-srv-test-very-long-hostname-01"], &[]);
+    let mut ui = simulator(ui::view(&app));
+    if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+        let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("long-tab"));
+    }
+}
+
+#[test]
 fn new_server_dialog_copy() {
     let mut app = app();
     let _ = app.update(Message::HostNewIn(None));
-    let _ = app.update(Message::HostAdvanced);
+    {
+        let mut ui = simulator(ui::view(&app));
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("new-server"));
+        }
+        // Connection fields are always in view; extras sit behind tabs.
+        for t in ["새 서버", "주소", "비밀번호", "SSH 키", "경유 서버", "터널", "저장하고 연결"] {
+            ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
+        }
+        for gone in ["고급 설정", "자동 터널", "jumphost 서버", "ProxyJump", "IdentityFile", "새 호스트", "ssh 명령으로 채우기"] {
+            assert!(ui.find(gone).is_err(), "{gone} should not appear");
+        }
+    }
+    let _ = app.update(Message::HostTab(crate::app::HostTab::Tunnels));
     let mut ui = simulator(ui::view(&app));
-    if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
-        let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("new-server"));
-    }
-    for t in ["새 서버", "주소", "고급 설정", "경유 서버", "SSH 키", "자동 터널", "저장하고 연결"] {
-        ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
-    }
-    for t in ["서버 포트 열기", "내 PC 포트 공유", "SOCKS 프록시", "MySQL", "+ 터널 추가"] {
+    ui.find("주소").expect("connection fields stay while switching tabs");
+    for t in ["자동 터널", "서버 포트 열기", "내 PC 포트 공유", "SOCKS 프록시", "MySQL", "+ 터널 추가"] {
         ui.find(t).unwrap_or_else(|_| panic!("tunnel builder: {t} missing"));
     }
-    for gone in ["jumphost 서버", "ProxyJump", "IdentityFile", "새 호스트", "ssh 명령으로 채우기", "예: L:3306:localhost:3306"] {
-        assert!(ui.find(gone).is_err(), "{gone} should not appear");
-    }
+    assert!(ui.find("예: L:3306:localhost:3306").is_err());
 }
 
 #[test]
@@ -1409,7 +1480,6 @@ fn ssh_keys_are_listed_imported_picked_and_deleted() {
 
     // Picked in the server editor, stored as a ~ path.
     let _ = app.update(Message::HostNewIn(None));
-    let _ = app.update(Message::HostAdvanced);
     let _ = app.update(Message::HostField(HostField::Identity, "~/.ssh/id_ed25519".into()));
     let chosen = app.editor.as_ref().unwrap().def.identity_file.clone();
     assert_eq!(chosen.as_deref(), Some("~/.ssh/id_ed25519"));
@@ -1762,9 +1832,7 @@ fn readme_screenshots() {
 
     // 3. Server editor: block-built auto tunnel.
     let _ = app.update(Message::HostEdit("db-01".into()));
-    if !app.editor.as_ref().unwrap().advanced {
-        let _ = app.update(Message::HostAdvanced);
-    }
+    let _ = app.update(Message::HostTab(crate::app::HostTab::Tunnels));
     let _ = app.update(Message::TunnelPreset(3306));
     shot(&app, "server-editor");
 

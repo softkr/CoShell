@@ -446,8 +446,10 @@ pub struct HostEditor {
     /// Auto-tunnel being put together (same form as the tunnel popover).
     pub tunnel: TunnelForm,
     /// "ssh -p 41 root@host" pasted by the user.
-    /// Jump host / key file / tunnels section expanded.
-    pub advanced: bool,
+    /// Optional section shown under the connection fields.
+    pub tab: HostTab,
+    /// Jump chain being edited, first hop first; "" is a hop not picked yet.
+    pub jumps: Vec<String>,
     pub error: Option<String>,
     /// New password typed by the user (empty = keep as is).
     pub password: Zeroizing<String>,
@@ -459,15 +461,34 @@ pub struct HostEditor {
     pub confirm_delete: bool,
 }
 
+/// Optional sections of the server editor, under the always-visible connection fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HostTab {
+    #[default]
+    Jump,
+    Tunnels,
+}
+
+impl HostEditor {
+    /// Write the picked hops back as a `ProxyJump` value; unpicked slots are left out.
+    fn sync_jumps(&mut self) {
+        let picked: Vec<&str> = self.jumps.iter().map(String::as_str).filter(|j| !j.is_empty()).collect();
+        self.def.proxy_jump = (!picked.is_empty()).then(|| picked.join(","));
+    }
+}
+
+/// `ProxyJump` value → hops, first hop first.
+fn split_jumps(v: Option<&str>) -> Vec<String> {
+    v.unwrap_or_default().split(',').map(str::trim).filter(|j| !j.is_empty()).map(String::from).collect()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum HostField {
     Name,
     Group,
-    Alias,
     HostName,
     User,
     Port,
-    ProxyJump,
     Identity,
     Password,
 }
@@ -625,13 +646,18 @@ pub enum Message {
     HostView,
     HostConnect(String),
     HostNewIn(Option<String>),
-    HostAdvanced,
+    HostTab(HostTab),
     HostGroupPick(String),
     HostFilter(String),
     HostEditorClose,
     HostField(HostField, String),
     HostEnv(Env),
     HostForwardRemove(usize),
+    /// Jump chain: pick server `alias` for hop `i` (`i == len` appends).
+    HostJumpPick(usize, String),
+    /// Insert an empty hop after hop `i`.
+    HostJumpAdd(usize),
+    HostJumpRemove(usize),
     HostSave(bool),
     HostDelete,
     HostDeleteAsk,
@@ -2382,8 +2408,11 @@ impl CoShell {
             | Message::HostField(..)
             | Message::HostEnv(_)
             | Message::HostForwardRemove(_)
+            | Message::HostJumpPick(..)
+            | Message::HostJumpAdd(_)
+            | Message::HostJumpRemove(_)
             | Message::HostSave(_)
-            | Message::HostAdvanced
+            | Message::HostTab(_)
             | Message::HostGroupPick(_)
             | Message::HostForgetPassword
             | Message::HostDeleteAsk
@@ -2401,7 +2430,7 @@ impl CoShell {
             None => HostDef::default(),
         };
         let port = def.port.map(|p| p.to_string()).unwrap_or_default();
-        let advanced = def.proxy_jump.is_some() || def.identity_file.is_some() || !def.forwards.is_empty();
+        let jumps = split_jumps(def.proxy_jump.as_deref());
         let saved_password =
             alias.as_deref().and_then(|a| self.password_key_of(a)).filter(|k| self.passwords.get(k).is_some());
         self.editor = Some(HostEditor {
@@ -2410,7 +2439,8 @@ impl CoShell {
             external,
             port,
             tunnel: TunnelForm::default(),
-            advanced,
+            tab: HostTab::default(),
+            jumps,
             error: None,
             password: Zeroizing::default(),
             saved_password,
@@ -2429,11 +2459,9 @@ impl CoShell {
             Message::HostField(f, v) => match f {
                 HostField::Name => ed.def.name = (!v.trim().is_empty()).then_some(v),
                 HostField::Group => ed.def.group = (!v.trim().is_empty()).then_some(v),
-                HostField::Alias => ed.def.alias = v.trim().to_string(),
                 HostField::HostName => ed.def.hostname = opt(v),
                 HostField::User => ed.def.user = opt(v),
                 HostField::Port => ed.port = v,
-                HostField::ProxyJump => ed.def.proxy_jump = opt(v),
                 HostField::Identity => ed.def.identity_file = opt(v),
                 HostField::Password => ed.password = Zeroizing::new(v),
             },
@@ -2442,9 +2470,22 @@ impl CoShell {
                 ed.password = Zeroizing::default();
             }
             Message::HostGroupPick(g) => ed.def.group = Some(g),
-            Message::HostAdvanced => ed.advanced = !ed.advanced,
+            Message::HostTab(t) => ed.tab = t,
             Message::HostForwardRemove(i) if i < ed.def.forwards.len() => {
                 ed.def.forwards.remove(i);
+            }
+            Message::HostJumpPick(i, alias) if i <= ed.jumps.len() => {
+                if i == ed.jumps.len() {
+                    ed.jumps.push(alias);
+                } else {
+                    ed.jumps[i] = alias;
+                }
+                ed.sync_jumps();
+            }
+            Message::HostJumpAdd(i) if i < ed.jumps.len() => ed.jumps.insert(i + 1, String::new()),
+            Message::HostJumpRemove(i) if i < ed.jumps.len() => {
+                ed.jumps.remove(i);
+                ed.sync_jumps();
             }
             Message::HostDeleteAsk => ed.confirm_delete = true,
             Message::HostDelete => {
@@ -2552,9 +2593,6 @@ impl CoShell {
             };
             if def.hostname.is_none() {
                 return Err(tr("주소를 입력하세요").into());
-            }
-            if self.user_config_entry(&def.alias).is_some() {
-                return Err(tr("~/.ssh/config에 같은 별칭이 있습니다. 고급 설정에서 다른 ssh 별칭을 입력하세요.").into());
             }
         }
         def.validate()?;

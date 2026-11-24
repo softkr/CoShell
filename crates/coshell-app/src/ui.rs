@@ -25,6 +25,8 @@ const PILL_MAX_W: f32 = 320.0;
 /// Session tab strip above the terminal.
 pub(crate) const BAR_H: f32 = 44.0;
 const TAB_MAX_W: f32 = 240.0;
+/// Room a tab keeps beside its name: padding, dot, attention mark and close button.
+const TAB_CHROME_W: f32 = 76.0;
 /// A tab's rounded fill, inside the strip.
 const TAB_H: f32 = 32.0;
 const TAB_RENAME_W: f32 = 140.0;
@@ -646,7 +648,7 @@ fn tab_item<'a>(app: &'a CoShell, t: &'a Tab) -> El<'a> {
         }
     };
     let c = tab_color(t);
-    let mut label = row![dot(if active { c } else { alpha(c, 0.6) }, 8.0), container(title).clip(true)].spacing(8).align_y(Alignment::Center);
+    let mut label = row![dot(if active { c } else { alpha(c, 0.6) }, 8.0), container(title).max_width(TAB_MAX_W - TAB_CHROME_W).clip(true)].spacing(8).align_y(Alignment::Center);
     if attention {
         label = label.push(text("!").size(11).color(theme::WARN));
     }
