@@ -222,8 +222,8 @@ fn tunnel_popover_lists_states_and_controls() {
     for t in ["시작 중…", "서버가 거부했습니다", "외부 노출", "중지됨", "서버 → 내 PC", "내 PC → 서버", "SOCKS 프록시", "경유: ec2-user@bastion"] {
         ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
     }
-    ui.click("중지").expect("stop button");
-    ui.click("시작").expect("start button");
+    ui.click(iced::widget::Id::new(crate::ui_tunnel::TUNNEL_STOP)).expect("stop button");
+    ui.click(iced::widget::Id::new(crate::ui_tunnel::TUNNEL_START)).expect("start button");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(m, Message::TunnelStop(t, 1) if *t == id)), "{msgs:?}");
     assert!(msgs.iter().any(|m| matches!(m, Message::TunnelStart(t, 2) if *t == id)), "{msgs:?}");
@@ -709,17 +709,17 @@ fn new_server_dialog_copy() {
             let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("new-server"));
         }
         // Connection fields are always in view; extras sit behind tabs.
-        for t in ["새 서버", "주소", "비밀번호", "SSH 키", "경유 서버", "터널", "저장하고 연결"] {
+        for t in ["새 서버", "주소", "비밀번호", "SSH 키", "경유 서버", "터널", "저장"] {
             ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
         }
-        for gone in ["고급 설정", "자동 터널", "jumphost 서버", "ProxyJump", "IdentityFile", "새 호스트", "ssh 명령으로 채우기"] {
+        for gone in ["고급 설정", "자동 터널", "jumphost 서버", "ProxyJump", "IdentityFile", "새 호스트", "ssh 명령으로 채우기", "저장하고 연결"] {
             assert!(ui.find(gone).is_err(), "{gone} should not appear");
         }
     }
     let _ = app.update(Message::HostTab(crate::app::HostTab::Tunnels));
     let mut ui = simulator(ui::view(&app));
     ui.find("주소").expect("connection fields stay while switching tabs");
-    for t in ["자동 터널", "서버 포트 열기", "내 PC 포트 공유", "SOCKS 프록시", "MySQL", "+ 터널 추가"] {
+    for t in ["자동 터널", "서버 포트 열기", "내 PC 포트 공유", "SOCKS 프록시", "MySQL", "터널 추가"] {
         ui.find(t).unwrap_or_else(|_| panic!("tunnel builder: {t} missing"));
     }
     assert!(ui.find("예: L:3306:localhost:3306").is_err());
@@ -1310,6 +1310,20 @@ fn notices_are_toasts_and_unsafe_links_are_refused() {
 }
 
 #[test]
+fn ai_panel_greets_with_the_server_name_not_the_terminal_title() {
+    let mut app = app();
+    let id = app.open_local();
+    let tab = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+    tab.name = "console".into();
+    tab.title = "ubuntu@console: ~".into();
+    app.ai.open = true;
+    simulator(ui::view(&app)).find("console에 대해서 물어보세요").expect("server name");
+    // A name the user typed for the tab wins.
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().custom_name = Some("운영 콘솔".into());
+    simulator(ui::view(&app)).find("운영 콘솔에 대해서 물어보세요").expect("custom name");
+}
+
+#[test]
 fn ai_panel_width_follows_the_divider_within_limits() {
     use crate::settings::AI_PANEL_W_MIN;
     let mut app = app();
@@ -1389,6 +1403,63 @@ fn sidebar_lists_servers_and_snippets_type_into_the_terminal() {
     let _ = app.update(Message::TermInsert("uptime".into()));
     assert!(app.notice.is_none(), "typed into the live terminal: {:?}", app.notice);
     assert!(app.tabs.iter().any(|t| t.id == id));
+}
+
+#[test]
+fn snippets_are_added_edited_and_deleted() {
+    use crate::app::SnippetField;
+    let mut app = app();
+    let builtin = app.snippets().len();
+    let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Snippets));
+
+    // Add: a name and a command are required; what is typed is trimmed to one line.
+    let _ = app.update(Message::SnippetNew);
+    simulator(ui::view(&app)).find("새 스니펫").expect("editor title");
+    let _ = app.update(Message::SnippetSave);
+    assert!(app.snippet_editor.as_ref().is_some_and(|e| e.error.is_some()), "empty snippet is refused");
+    let _ = app.update(Message::SnippetField(SnippetField::Title, "  도커 목록 ".into()));
+    let _ = app.update(Message::SnippetField(SnippetField::Cmd, "docker ps\n".into()));
+    let _ = app.update(Message::SnippetSave);
+    assert!(app.snippet_editor.is_none());
+    let list = app.snippets();
+    assert_eq!(list.len(), builtin + 1, "added after the built-ins");
+    assert_eq!((list[builtin].title.as_str(), list[builtin].cmd.as_str()), ("도커 목록", "docker ps"));
+    assert_eq!(app.settings.snippets.as_ref().map(Vec::len), Some(builtin + 1), "kept in the settings file");
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("$ docker ps").expect("new snippet listed");
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("snippets"));
+        }
+        ui.click(iced::widget::Id::new(crate::ui_sidebar::SNIPPET_EDIT)).expect("pencil on a card");
+        assert!(ui.into_messages().any(|m| matches!(m, Message::SnippetEdit(0))));
+    }
+
+    // Edit the first one.
+    let _ = app.update(Message::SnippetEdit(0));
+    simulator(ui::view(&app)).find("스니펫 편집").expect("editor title");
+    let _ = app.update(Message::SnippetField(SnippetField::Cmd, "df -hT".into()));
+    let _ = app.update(Message::SnippetSave);
+    assert_eq!(app.snippets()[0].cmd, "df -hT");
+    assert_eq!(app.snippets().len(), builtin + 1);
+
+    // Delete asks twice; Esc closes the editor without deleting.
+    let _ = app.update(Message::SnippetEdit(0));
+    let _ = app.update(Message::SnippetDeleteAsk);
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("정말 삭제").expect("confirm");
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("snippet-editor"));
+        }
+    }
+    let _ = app.update(Message::Shortcut(crate::app::Shortcut::Escape));
+    assert!(app.snippet_editor.is_none());
+    assert_eq!(app.snippets().len(), builtin + 1);
+    let _ = app.update(Message::SnippetEdit(0));
+    let _ = app.update(Message::SnippetDelete);
+    assert_eq!(app.snippets().len(), builtin);
+    assert_ne!(app.snippets()[0].cmd, "df -hT");
 }
 
 #[test]
@@ -1578,7 +1649,7 @@ fn ssh_keys_are_listed_imported_picked_and_deleted() {
     let _ = app.update(Message::KeyImportNote("배포용".into()));
     {
         let mut ui = simulator(ui::view(&app));
-        ui.find("✓ ED25519 키").expect("key recognised");
+        ui.find("ED25519 키").expect("key recognised");
         if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
             let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("key-import"));
         }
@@ -2115,7 +2186,7 @@ fn new_release_is_offered_in_the_status_bar() {
     let _ = app.update(Message::UpdateChecked(Ok(Some(rel.clone()))));
     assert!(app.notice.as_deref().is_some_and(|n| n.contains("9.0.0")));
     let mut ui = simulator(ui::view(&app));
-    ui.click("⬆ 9.0.0 업데이트").expect("status bar offer");
+    ui.click("9.0.0 업데이트").expect("status bar offer");
     for m in ui.into_messages() {
         let _ = app.update(m);
     }
@@ -2138,7 +2209,7 @@ fn new_release_is_offered_in_the_status_bar() {
     assert!(app.update.is_some(), "a failed check keeps what was found");
     let _ = app.update(Message::UpdateChecked(Ok(None)));
     assert!(app.update.is_none());
-    assert!(simulator(ui::view(&app)).find("⬆ 9.0.0 업데이트").is_err());
+    assert!(simulator(ui::view(&app)).find("9.0.0 업데이트").is_err());
 }
 
 #[test]

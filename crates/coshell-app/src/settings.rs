@@ -24,6 +24,10 @@ pub const SIDEBAR_W_DEFAULT: f32 = 256.0;
 pub const SIDEBAR_W_MIN: f32 = 210.0;
 pub const SIDEBAR_W_MAX: f32 = 380.0;
 const FONT_FAMILY_MAX_CHARS: usize = 64;
+pub const SNIPPETS_MAX: usize = 200;
+const SNIPPET_TITLE_MAX_CHARS: usize = 60;
+const SNIPPET_CATEGORY_MAX_CHARS: usize = 20;
+const SNIPPET_CMD_MAX_CHARS: usize = 2000;
 const WINDOW_DEFAULT: (f32, f32) = (1200.0, 760.0);
 const WINDOW_MIN: (f32, f32) = (640.0, 400.0);
 const WINDOW_MAX: (f32, f32) = (8192.0, 8192.0);
@@ -96,6 +100,32 @@ impl CursorKind {
     }
 }
 
+/// A saved command: typed into the terminal, optionally with Enter.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Snippet {
+    pub title: String,
+    pub category: String,
+    pub cmd: String,
+}
+
+/// `s` trimmed, on one line and at most `max` characters.
+fn one_line(s: &str, max: usize) -> String {
+    s.trim().chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+impl Snippet {
+    /// Trimmed, single-line and bounded; `None` without a name or a command.
+    pub fn sanitize(&self) -> Option<Self> {
+        let s = Self {
+            title: one_line(&self.title, SNIPPET_TITLE_MAX_CHARS),
+            category: one_line(&self.category, SNIPPET_CATEGORY_MAX_CHARS),
+            cmd: one_line(&self.cmd, SNIPPET_CMD_MAX_CHARS),
+        };
+        (!s.title.is_empty() && !s.cmd.is_empty()).then_some(s)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowSize {
     pub width: f32,
@@ -138,6 +168,8 @@ pub struct Settings {
     /// Show commands and their output as blocks (the raw terminal for full-screen programs).
     pub block_view: bool,
     pub window: WindowSize,
+    /// Sidebar snippets; `None` = the built-in set.
+    pub snippets: Option<Vec<Snippet>>,
 }
 
 impl Default for Settings {
@@ -160,6 +192,7 @@ impl Default for Settings {
             sidebar_width: SIDEBAR_W_DEFAULT,
             block_view: true,
             window: WindowSize::default(),
+            snippets: None,
         }
     }
 }
@@ -186,6 +219,7 @@ impl Settings {
         self.sidebar_width = clamp_or(self.sidebar_width, SIDEBAR_W_MIN, SIDEBAR_W_MAX, SIDEBAR_W_DEFAULT);
         self.window.width = clamp_or(self.window.width, WINDOW_MIN.0, WINDOW_MAX.0, WINDOW_DEFAULT.0);
         self.window.height = clamp_or(self.window.height, WINDOW_MIN.1, WINDOW_MAX.1, WINDOW_DEFAULT.1);
+        self.snippets = self.snippets.map(|v| v.iter().filter_map(Snippet::sanitize).take(SNIPPETS_MAX).collect());
         self
     }
 
@@ -247,6 +281,24 @@ mod tests {
         assert_eq!(s.scrollback, SCROLLBACK_MIN);
         assert_eq!(s.ai_attach_lines, ATTACH_LINES_MAX);
         assert_eq!((s.window.width, s.window.height), (WINDOW_DEFAULT.0, WINDOW_MIN.1));
+    }
+
+    #[test]
+    fn snippets_round_trip_and_are_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let sn = Snippet { title: "disk".into(), category: "diag".into(), cmd: "df -h".into() };
+        let s = Settings { snippets: Some(vec![sn.clone()]), ..Settings::default() };
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap(), s);
+        // An emptied list stays empty instead of bringing the built-ins back.
+        let none = Settings { snippets: Some(Vec::new()), ..Settings::default() };
+        none.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().snippets, Some(Vec::new()));
+        // Hand-edited: control characters go, entries without a command are dropped.
+        std::fs::write(&path, "[[snippets]]\ntitle = \"  a\\u0007 \"\ncmd = \"ls\\nrm -rf x\"\n[[snippets]]\ntitle = \"no command\"\n").unwrap();
+        let got = Settings::load(&path).unwrap().snippets.unwrap();
+        assert_eq!(got, vec![Snippet { title: "a".into(), category: String::new(), cmd: "lsrm -rf x".into() }]);
     }
 
     #[test]

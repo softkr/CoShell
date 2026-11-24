@@ -8,7 +8,8 @@ use iced::{Alignment, Background, Border, Font, Length, Padding};
 use crate::app::{CoShell, Message};
 use crate::hosts::Env;
 use crate::theme::{self, alpha};
-use crate::ui::{Btn, El, btn, btn_style, input_style, mono, muted};
+use crate::icons::{MORE, PLUS};
+use crate::ui::{Btn, El, btn_style, icon_text_btn, input_style, mono, muted};
 use crate::ui_hosts::env_tag;
 
 const CARD_W: f32 = 270.0;
@@ -70,8 +71,8 @@ fn card(c: Card) -> El<'static> {
         text(c.title).size(14).color(theme::TEXT),
         env_tag(c.env),
         Space::new().width(Length::Fill),
-        button(text("⋯").size(14).color(theme::TEXT_3))
-            .padding([0, 6])
+        button(crate::icons::tinted(&MORE, 14.0, theme::TEXT_3))
+            .padding([2, 6])
             .style(btn_style(Btn::Ghost))
             .on_press(Message::HostEdit(c.alias.clone())),
     ]
@@ -122,7 +123,7 @@ pub fn page(app: &CoShell) -> El<'_> {
             .padding([6, 10])
             .width(260)
             .style(input_style),
-        btn(tr("+ 새 서버"), Btn::Primary, Some(Message::HostNewIn(None))),
+        icon_text_btn(&PLUS, tr("새 서버"), Btn::Primary, Some(Message::HostNewIn(None))),
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -134,7 +135,7 @@ pub fn page(app: &CoShell) -> El<'_> {
             container(
                 column![
                     text(if total == 0 { tr("저장된 서버가 없습니다") } else { tr("검색 결과가 없습니다") }).size(14),
-                    muted(tr("‘+ 새 서버’를 눌러 추가하세요.")),
+                    muted(tr("‘새 서버’를 눌러 추가하세요.")),
                 ]
                 .spacing(6)
                 .align_x(Alignment::Center),
@@ -153,7 +154,7 @@ pub fn page(app: &CoShell) -> El<'_> {
         .spacing(8)
         .align_y(Alignment::Center);
         if addable {
-            head = head.push(Space::new().width(Length::Fill)).push(btn(tr("+ 추가"), Btn::Ghost, Some(Message::HostNewIn(target))));
+            head = head.push(Space::new().width(Length::Fill)).push(icon_text_btn(&PLUS, tr("추가"), Btn::Ghost, Some(Message::HostNewIn(target))));
         }
         let grid = row(list.into_iter().map(card).collect::<Vec<_>>()).spacing(14).wrap().vertical_spacing(14);
         col = col.push(column![head, grid].spacing(10));
@@ -174,7 +175,7 @@ pub fn manage(app: &CoShell) -> El<'_> {
             .padding([6, 10])
             .width(Length::Fill)
             .style(input_style),
-        btn(tr("+ 새 서버"), Btn::Primary, Some(Message::HostNewIn(None))),
+        icon_text_btn(&PLUS, tr("새 서버"), Btn::Primary, Some(Message::HostNewIn(None))),
     ]
     .spacing(10)
     .align_y(Alignment::Center);

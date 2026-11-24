@@ -292,6 +292,22 @@ pub enum SettingsTab {
     Ai,
 }
 
+/// The snippet editor: a new snippet, or the one at `index`.
+#[derive(Default)]
+pub struct SnippetEditor {
+    pub index: Option<usize>,
+    pub draft: settings::Snippet,
+    pub confirm_delete: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SnippetField {
+    Title,
+    Category,
+    Cmd,
+}
+
 /// "Import key" dialog.
 pub struct KeyImport {
     pub name: String,
@@ -356,6 +372,7 @@ pub struct CoShell {
     /// Keys offered in the server editor and the settings' SSH keys page.
     pub keys: Vec<crate::keys::SshKey>,
     pub key_import: Option<KeyImport>,
+    pub snippet_editor: Option<SnippetEditor>,
     /// An input method is composing text (placeholders of multi-line editors step aside).
     pub composing: bool,
     /// A newer release, once found.
@@ -544,8 +561,15 @@ pub enum Message {
     SidebarTab(SidebarTab),
     /// Fold / unfold a server group in the sidebar.
     GroupToggle(String),
-    /// A built-in snippet: (index, run it = type + Enter; otherwise only type it).
+    /// A snippet: (index, run it = type + Enter; otherwise only type it).
     Snippet(usize, bool),
+    SnippetNew,
+    SnippetEdit(usize),
+    SnippetField(SnippetField, String),
+    SnippetSave,
+    SnippetDeleteAsk,
+    SnippetDelete,
+    SnippetEditorClose,
     /// Type a command into the active terminal without running it.
     TermInsert(String),
     /// Clear the active terminal screen (Ctrl+L).
@@ -852,6 +876,7 @@ impl CoShell {
             tunnel_form: TunnelForm::default(),
             keys: Vec::new(),
             key_import: None,
+            snippet_editor: None,
             composing: false,
             update: None,
             update_confirm: false,
@@ -1062,6 +1087,61 @@ impl CoShell {
 
     fn configure_session(&self, s: &Session) {
         s.configure(self.settings.scrollback, cursor_shape(self.settings.cursor));
+    }
+
+    /// The sidebar's snippets: the user's list, or the built-in set until it is edited.
+    pub fn snippets(&self) -> Vec<settings::Snippet> {
+        self.settings.snippets.clone().unwrap_or_else(crate::ui_sidebar::builtin_snippets)
+    }
+
+    fn update_snippet_editor(&mut self, m: Message) {
+        let Some(ed) = &mut self.snippet_editor else { return };
+        match m {
+            Message::SnippetField(f, v) => {
+                match f {
+                    SnippetField::Title => ed.draft.title = v,
+                    SnippetField::Category => ed.draft.category = v,
+                    SnippetField::Cmd => ed.draft.cmd = v,
+                }
+                ed.error = None;
+                ed.confirm_delete = false;
+            }
+            Message::SnippetDeleteAsk => ed.confirm_delete = true,
+            Message::SnippetDelete => {
+                let Some(i) = ed.index else { return };
+                let mut list = self.snippets();
+                if i < list.len() {
+                    list.remove(i);
+                }
+                self.store_snippets(list);
+            }
+            Message::SnippetSave => {
+                let Some(sn) = ed.draft.sanitize() else {
+                    ed.error = Some(tr("이름과 명령을 입력하세요").into());
+                    return;
+                };
+                let index = ed.index;
+                let mut list = self.snippets();
+                match index {
+                    Some(i) if i < list.len() => list[i] = sn,
+                    _ if list.len() >= settings::SNIPPETS_MAX => {
+                        if let Some(ed) = &mut self.snippet_editor {
+                            ed.error = Some(tf("스니펫은 {0}개까지 저장할 수 있습니다", &[&settings::SNIPPETS_MAX]));
+                        }
+                        return;
+                    }
+                    _ => list.push(sn),
+                }
+                self.store_snippets(list);
+            }
+            _ => {}
+        }
+    }
+
+    fn store_snippets(&mut self, list: Vec<settings::Snippet>) {
+        self.settings.snippets = Some(list);
+        self.snippet_editor = None;
+        self.persist_settings();
     }
 
     fn persist_settings(&mut self) {
@@ -1904,10 +1984,28 @@ impl CoShell {
                 }
                 Task::none()
             }
-            Message::Snippet(i, run) => match crate::ui_sidebar::SNIPPETS.get(i) {
-                Some(sn) => self.type_into_terminal(sn.cmd, run),
+            Message::Snippet(i, run) => match self.snippets().get(i) {
+                Some(sn) => self.type_into_terminal(&sn.cmd, run),
                 None => Task::none(),
             },
+            Message::SnippetNew => {
+                self.snippet_editor = Some(SnippetEditor::default());
+                Task::none()
+            }
+            Message::SnippetEdit(i) => {
+                if let Some(draft) = self.snippets().into_iter().nth(i) {
+                    self.snippet_editor = Some(SnippetEditor { index: Some(i), draft, ..SnippetEditor::default() });
+                }
+                Task::none()
+            }
+            Message::SnippetEditorClose => {
+                self.snippet_editor = None;
+                Task::none()
+            }
+            m @ (Message::SnippetField(..) | Message::SnippetSave | Message::SnippetDeleteAsk | Message::SnippetDelete) => {
+                self.update_snippet_editor(m);
+                Task::none()
+            }
             Message::TermInsert(cmd) => self.type_into_terminal(&cmd, false),
             Message::TermClear => {
                 let Some(id) = self.active else { return Task::none() };
@@ -2925,6 +3023,7 @@ impl CoShell {
             Shortcut::Escape if self.delete_confirm.is_some() => self.update(Message::HostDeleteCancel),
             Shortcut::Escape if self.update_confirm => self.update(Message::UpdateCancel),
             Shortcut::Escape if self.key_import.is_some() => self.update(Message::KeyImportClose),
+            Shortcut::Escape if self.snippet_editor.is_some() => self.update(Message::SnippetEditorClose),
             Shortcut::Escape if self.editor.is_some() => self.update(Message::HostEditorClose),
             Shortcut::Escape if self.settings_draft.is_some() => self.update(Message::SettingsClose),
             Shortcut::Escape if self.close_confirm.is_some() => self.update(Message::CloseCancel),

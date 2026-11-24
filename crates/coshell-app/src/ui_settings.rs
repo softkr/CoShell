@@ -6,6 +6,7 @@ use iced::{Alignment, Background, Border, Color, Font, Length};
 
 use crate::app::{CoShell, Message, SettingsDraft, SettingsTab};
 use crate::settings::{self, CursorKind, Language, Scheme};
+use crate::icons::{MINUS, PLUS};
 use crate::theme::{self, alpha};
 use crate::ui::{Btn, El, btn, card_style, input_style, mono, muted};
 
@@ -150,10 +151,14 @@ pub fn dialog<'a>(app: &'a CoShell, d: &'a SettingsDraft) -> El<'a> {
 
 fn general(d: &SettingsDraft) -> El<'_> {
     let s = &d.s;
+    let step = |icon, msg: Option<Message>| {
+        let color = if msg.is_some() { theme::TEXT } else { alpha(theme::TEXT, 0.4) };
+        button(crate::icons::tinted(icon, 12.0, color)).padding([7, 12]).style(crate::ui::btn_style(Btn::Plain)).on_press_maybe(msg)
+    };
     let font_size = row![
-        btn("−", Btn::Plain, (s.font_size > settings::FONT_SIZE_MIN).then_some(Message::SettingsFontSize(-1))),
+        step(&MINUS, (s.font_size > settings::FONT_SIZE_MIN).then_some(Message::SettingsFontSize(-1))),
         container(mono(format!("{} px", s.font_size), 12.0, theme::TEXT)).width(56).center_x(56),
-        btn("+", Btn::Plain, (s.font_size < settings::FONT_SIZE_MAX).then_some(Message::SettingsFontSize(1))),
+        step(&PLUS, (s.font_size < settings::FONT_SIZE_MAX).then_some(Message::SettingsFontSize(1))),
     ]
     .spacing(6)
     .align_y(Alignment::Center);

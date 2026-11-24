@@ -9,8 +9,12 @@ use iced::{Alignment, Background, Border, Color, Length, Padding};
 
 use crate::app::{CoShell, Message, Tab, TunnelEntry, TunnelField, TunnelForm, TunnelState, form_spec};
 use crate::theme::{self, alpha};
-use crate::ui::{Btn, El, btn, btn_style, card_style, input_style, mono, muted};
+use crate::icons::{COPY, EXTERNAL_LINK, PLAY, STOP, X};
+use crate::ui::{Btn, El, btn, btn_style, card_style, icon_btn, input_style, mono, muted};
 
+/// Ids of a tunnel row's stop / start buttons.
+pub const TUNNEL_STOP: &str = "tunnel-stop";
+pub const TUNNEL_START: &str = "tunnel-start";
 const POPOVER_W: f32 = 520.0;
 const POPOVER_MAX_H: f32 = 620.0;
 /// Distance from the window bottom (status bar + gap).
@@ -119,22 +123,22 @@ fn tunnel_row(tab_id: u64, e: &TunnelEntry) -> El<'_> {
     let mut actions = row![].spacing(4).align_y(Alignment::Center);
     match (&e.state, &e.spec, bound_port(e)) {
         (TunnelState::Running(_), ForwardSpec::Local { host_port, .. }, Some(b)) => {
-            actions = actions.push(btn(tr("복사"), Btn::Ghost, Some(Message::TunnelCopy(format!("localhost:{b}")))));
+            actions = actions.push(icon_btn(&COPY, tr("복사"), Btn::Ghost, Some(Message::TunnelCopy(format!("localhost:{b}")))));
             if let Some(https) = web_port(*host_port) {
-                actions = actions.push(btn(tr("열기"), Btn::Ghost, Some(Message::TunnelOpen(b, https))));
+                actions = actions.push(icon_btn(&EXTERNAL_LINK, tr("열기"), Btn::Ghost, Some(Message::TunnelOpen(b, https))));
             }
         }
         (TunnelState::Running(_), ForwardSpec::Dynamic { .. }, Some(b)) => {
-            actions = actions.push(btn(tr("복사"), Btn::Ghost, Some(Message::TunnelCopy(format!("socks5://localhost:{b}")))));
+            actions = actions.push(icon_btn(&COPY, tr("복사"), Btn::Ghost, Some(Message::TunnelCopy(format!("socks5://localhost:{b}")))));
         }
         _ => {}
     }
     actions = match &e.state {
-        TunnelState::Running(_) | TunnelState::Starting => actions.push(btn(tr("중지"), Btn::Plain, Some(Message::TunnelStop(tab_id, id)))),
-        TunnelState::Stopped | TunnelState::Failed(_) => actions.push(btn(tr("시작"), Btn::Primary, Some(Message::TunnelStart(tab_id, id)))),
+        TunnelState::Running(_) | TunnelState::Starting => actions.push(container(icon_btn(&STOP, tr("중지"), Btn::Plain, Some(Message::TunnelStop(tab_id, id)))).id(TUNNEL_STOP)),
+        TunnelState::Stopped | TunnelState::Failed(_) => actions.push(container(icon_btn(&PLAY, tr("시작"), Btn::Primary, Some(Message::TunnelStart(tab_id, id)))).id(TUNNEL_START)),
     };
     actions = actions.push(
-        button(text("×").size(13).color(theme::TEXT_3)).padding([0, 6]).style(btn_style(Btn::Ghost)).on_press(Message::TunnelRemove(tab_id, id)),
+        button(crate::icons::tinted(&X, 11.0, theme::TEXT_3)).padding(4).style(btn_style(Btn::Ghost)).on_press(Message::TunnelRemove(tab_id, id)),
     );
     let exposed: El<'_> = if e.spec.is_exposed() { chip(tr("외부 노출"), theme::WARN) } else { Space::new().into() };
     container(
@@ -286,7 +290,7 @@ pub fn popover(app: &CoShell) -> El<'_> {
             crate::icons::icon(&crate::icons::PORT_FORWARDING, 16.0),
             text(tr("터널")).size(14),
             Space::new().width(Length::Fill),
-            button(text("×").size(13).color(theme::TEXT_3)).padding([0, 6]).style(btn_style(Btn::Ghost)).on_press(Message::TunnelPanel),
+            button(crate::icons::tinted(&X, 11.0, theme::TEXT_3)).padding(4).style(btn_style(Btn::Ghost)).on_press(Message::TunnelPanel),
         ]
         .spacing(8)
         .align_y(Alignment::Center),

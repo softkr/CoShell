@@ -9,7 +9,7 @@ use crate::app::{CoShell, Message, Tab, TabId};
 use crate::context_menu::ContextMenu;
 use crate::files::{FileConfirm, FileInput, Files, FilesMsg, Link, Transfer, TransferState};
 use crate::i18n::{tf, tr};
-use crate::icons::{ARROW_UP, DOWNLOAD, FILE, FOLDER, FOLDER_PLUS, REFRESH, UPLOAD, X};
+use crate::icons::{ARROW_UP, DOWNLOAD, EXTERNAL_LINK, FILE, FOLDER, FOLDER_PLUS, PENCIL, REFRESH, UPLOAD, X};
 use crate::theme::{self, alpha};
 use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn, btn_style, card_style, input_style, mono, muted};
 
@@ -53,6 +53,16 @@ fn small_btn<'a>(label: &'a str, primary: bool, on_press: Option<Message>) -> El
         .padding([2, 9])
         .on_press_maybe(on_press)
         .style(crate::ui::tint_style(if primary { theme::ACCENT_TX } else { theme::TEXT_2 }, primary))
+        .into()
+}
+
+/// A `small_btn` with an icon before its label.
+fn small_icon_btn<'a>(icon: &'static std::sync::LazyLock<iced::widget::svg::Handle>, label: &'a str, primary: bool, on_press: Option<Message>) -> El<'a> {
+    let color = if primary { theme::ACCENT_TX } else { theme::TEXT_2 };
+    button(row![crate::icons::tinted(icon, 10.0, color), text(label).size(10.5)].spacing(4).align_y(Alignment::Center))
+        .padding([2, 9])
+        .on_press_maybe(on_press)
+        .style(crate::ui::tint_style(color, primary))
         .into()
 }
 
@@ -173,7 +183,7 @@ fn entry_row<'a>(id: TabId, f: &'a Files, e: &'a FileEntry) -> El<'a> {
     .spacing(8)
     .align_y(Alignment::Center);
     if e.link {
-        line = line.push(text("↗").size(10).color(theme::TEXT_3));
+        line = line.push(crate::icons::tinted(&EXTERNAL_LINK, 10.0, theme::TEXT_3));
     }
     if !folder {
         line = line.push(text(human_size(e.size)).size(10).font(crate::fonts::MONO).color(theme::TEXT_3));
@@ -203,8 +213,8 @@ fn entry_row<'a>(id: TabId, f: &'a Files, e: &'a FileEntry) -> El<'a> {
     }
     let actions = row![
         Space::new().width(Length::Fill),
-        small_btn(tr("편집"), false, Some(msg(id, FilesMsg::Edit(e.name.clone())))),
-        small_btn(tr("다운로드"), true, Some(msg(id, FilesMsg::Download(e.name.clone())))),
+        small_icon_btn(&PENCIL, tr("편집"), false, Some(msg(id, FilesMsg::Edit(e.name.clone())))),
+        small_icon_btn(&DOWNLOAD, tr("다운로드"), true, Some(msg(id, FilesMsg::Download(e.name.clone())))),
     ]
     .spacing(6);
     column![with_menu, container(actions).padding(Padding { top: 2.0, right: 8.0, bottom: 6.0, left: 8.0 })].into()
@@ -271,7 +281,7 @@ fn activity(id: TabId, f: &Files) -> El<'_> {
                 .spacing(6)
                 .align_y(Alignment::Center);
             if e.changed {
-                line = line.push(small_btn(tr("서버에 올리기"), true, Some(msg(id, FilesMsg::EditUpload(i)))));
+                line = line.push(small_icon_btn(&UPLOAD, tr("서버에 올리기"), true, Some(msg(id, FilesMsg::EditUpload(i)))));
             } else {
                 line = line.push(text(tr("저장하면 표시됩니다")).size(10).color(theme::TEXT_3));
             }

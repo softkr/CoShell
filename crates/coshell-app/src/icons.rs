@@ -45,6 +45,13 @@ svg_handle!(UPLOAD, "icons/upload.svg");
 svg_handle!(DOWNLOAD, "icons/download.svg");
 svg_handle!(REFRESH, "icons/refresh.svg");
 svg_handle!(ARROW_UP, "icons/arrow-up.svg");
+svg_handle!(ARROW_DOWN, "icons/arrow-down.svg");
+svg_handle!(MINUS, "icons/minus.svg");
+svg_handle!(CHEVRON_RIGHT, "icons/chevron-right.svg");
+svg_handle!(EXTERNAL_LINK, "icons/external-link.svg");
+svg_handle!(MORE, "icons/more.svg");
+svg_handle!(PLAY, "icons/play.svg");
+svg_handle!(PAPERCLIP, "icons/paperclip.svg");
 
 /// 256px PNG for the window / taskbar icon (Windows, Linux; macOS uses the bundle's .icns).
 const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");

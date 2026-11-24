@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::app::{CONFIRM_INPUT, CoShell, PALETTE_INPUT, Pending, Phase, RENAME_INPUT, SEARCH_INPUT, Search, Step, Tab, prompt_input_id};
 use crate::app::{Message, PaletteItem};
-use crate::icons::{LOCK, LOCK_OPEN, SEARCH, TRASH, X};
+use crate::icons::{ARROW_DOWN, ARROW_UP, LOCK, LOCK_OPEN, SEARCH, TRASH, X};
 use crate::terminal::TerminalView;
 use crate::hosts::Env;
 use crate::theme::{self, alpha};
@@ -111,16 +111,33 @@ pub(crate) fn btn<'a>(label: impl Into<String>, kind: Btn, msg: Option<Message>)
 }
 
 const ICON_SIZE: f32 = 14.0;
+/// Icon beside a button's label.
+const LABEL_ICON_SIZE: f32 = 12.0;
 
-/// A button showing only an icon; `label` appears on hover.
-pub(crate) fn icon_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>, label: &'a str, kind: Btn, msg: Option<Message>) -> El<'a> {
+/// Colour of an icon on a `kind` button.
+fn icon_color(kind: Btn, enabled: bool) -> Color {
     let color = match kind {
         Btn::Primary => theme::ON_ACCENT,
         Btn::Danger => Color::WHITE,
         Btn::Plain => theme::TEXT,
         Btn::Ghost => theme::TEXT_2,
     };
-    let color = if msg.is_some() { color } else { alpha(color, 0.4) };
+    if enabled { color } else { alpha(color, 0.4) }
+}
+
+/// A button with an icon before its label.
+pub(crate) fn icon_text_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>, label: impl Into<String>, kind: Btn, msg: Option<Message>) -> El<'a> {
+    let color = icon_color(kind, msg.is_some());
+    button(row![crate::icons::tinted(icon, LABEL_ICON_SIZE, color), text(label.into()).size(13)].spacing(6).align_y(Alignment::Center))
+        .padding([5, 12])
+        .style(btn_style(kind))
+        .on_press_maybe(msg)
+        .into()
+}
+
+/// A button showing only an icon; `label` appears on hover.
+pub(crate) fn icon_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>, label: &'a str, kind: Btn, msg: Option<Message>) -> El<'a> {
+    let color = icon_color(kind, msg.is_some());
     let b = button(crate::icons::tinted(icon, ICON_SIZE, color)).padding(6).style(btn_style(kind)).on_press_maybe(msg);
     tip(b, label, tooltip::Position::Top)
 }
@@ -356,6 +373,9 @@ pub fn view(app: &CoShell) -> El<'_> {
     }
     if let Some(k) = &app.key_import {
         layers.push(modal(crate::ui_keys::import_dialog(k, app.composing)));
+    }
+    if let Some(ed) = &app.snippet_editor {
+        layers.push(modal(crate::ui_sidebar::snippet_editor(ed)));
     }
     if let Some(ed) = &app.editor {
         layers.push(modal(crate::ui_hosts::editor(app, ed)));
@@ -818,21 +838,25 @@ fn status_bar(app: &CoShell) -> El<'_> {
     if let Some(u) = &app.update {
         right.push(sep());
         right.push(
-            button(text(tf("⬆ {0} 업데이트", &[&u.version])).size(11).color(theme::ACCENT_TX))
+            button(
+                row![crate::icons::tinted(&ARROW_UP, 11.0, theme::ACCENT_TX), text(tf("{0} 업데이트", &[&u.version])).size(11).color(theme::ACCENT_TX)]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+            )
                 .padding([1, 6])
                 .style(btn_style(Btn::Ghost))
                 .on_press(Message::UpdateAsk)
                 .into(),
         );
     }
-    // The sidebar footer shows these while it is open.
+    right.push(sep());
+    // The sidebar lists the servers while it is open.
     if !app.settings.sidebar_open {
-        right.push(sep());
         right.push(small(tf("서버 {0}", &[&app.hosts.len()]), theme::TEXT_3));
-        right.push(
-            button(text(format!("v{}", crate::VERSION)).size(11).color(theme::TEXT_3)).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::About).into(),
-        );
     }
+    right.push(
+        button(text(format!("v{}", crate::VERSION)).size(11).color(theme::TEXT_3)).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::About).into(),
+    );
     let bar = row![
         row(left).spacing(10).align_y(Alignment::Center),
         Space::new().width(Length::Fill),
@@ -921,8 +945,8 @@ fn search_bar(s: &Search) -> El<'_> {
                 .width(Length::Fill)
                 .style(bare_input_style),
             status,
-            btn("↑", Btn::Ghost, has_query.then_some(Message::SearchNext(false))),
-            btn("↓", Btn::Ghost, has_query.then_some(Message::SearchNext(true))),
+            icon_btn(&ARROW_UP, tr("이전 결과"), Btn::Ghost, has_query.then_some(Message::SearchNext(false))),
+            icon_btn(&ARROW_DOWN, tr("다음 결과"), Btn::Ghost, has_query.then_some(Message::SearchNext(true))),
             icon_btn(&X, tr("닫기"), Btn::Ghost, Some(Message::SearchClose)),
         ]
         .spacing(6)

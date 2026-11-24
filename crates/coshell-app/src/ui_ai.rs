@@ -6,14 +6,14 @@ use coshell_ai::{AuthStyle, Format, Role, chat_url, models_url};
 use iced::keyboard::key::Named;
 use iced::widget::text::Span;
 use iced::widget::text_editor::{self, Binding, KeyPress};
-use iced::widget::{Space, button, column, container, pick_list, rich_text, row, scrollable, span, text, text_input};
+use iced::widget::{Space, button, column, container, pick_list, rich_text, row, span, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
 use crate::ai::{AI_INPUT, Chat, Exec, ExecState, Settings, Turn};
 use crate::app::{CoShell, Message, Phase, Tab, TabId};
 use crate::assist::{self, Risk, Segment};
 use crate::theme::{self, alpha};
-use crate::icons::{CHECK, COPY, PENCIL, SEND, STOP, X, ZAP};
+use crate::icons::{CHECK, CHEVRON_DOWN, CHEVRON_RIGHT, COPY, PAPERCLIP, PENCIL, PLUS, SEND, STOP, X, ZAP};
 use crate::ui_status::Mark;
 use crate::ui::{BAR_H, Btn, El, Face, SEMIBOLD, btn, icon_btn, input_style, kbd, mono, muted, rule, tip};
 
@@ -157,7 +157,7 @@ pub fn panel(app: &CoShell) -> El<'_> {
         Some(t) => conversation(t, app.prod_guard, app.face, app.fold),
     };
     let composer: El<'_> = match tab {
-        Some(t) => column![chips(t), composer(app, t)].into(),
+        Some(t) => composer(app, t),
         None => Space::new().into(),
     };
     let header = container(header).padding(Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 16.0 }).height(BAR_H - 1.0).center_y(BAR_H - 1.0).clip(true);
@@ -282,7 +282,7 @@ fn welcome(tab: &Tab, face: Face) -> El<'_> {
     let mut col = column![
         ai_avatar(face),
         Space::new().height(6),
-        text(tf("{0}에 대해 물어보세요", &[&tab.display_name()])).size(13).font(SEMIBOLD).color(theme::SLATE_100),
+        text(tf("{0}에 대해서 물어보세요", &[&tab.custom_name.as_deref().unwrap_or(&tab.name)])).size(13).font(SEMIBOLD).color(theme::SLATE_100),
         muted(tr("터미널 출력은 직접 첨부할 때만 전송됩니다")),
         Space::new().height(12),
     ]
@@ -309,38 +309,9 @@ fn welcome(tab: &Tab, face: Face) -> El<'_> {
     container(col).padding(16).center(Length::Fill).into()
 }
 
-/// Quick prompts above the composer.
-fn chips(tab: &Tab) -> El<'_> {
-    let id = tab.id;
-    let busy = tab.chat.is_streaming();
-    let presets = [
-        ("🧹", tr("Nginx 로그 정리"), tr("nginx 로그 용량 안전하게 정리하는 방법 알려줘")),
-        ("📊", tr("프로세스 점검"), tr("현재 CPU와 메모리 점유율이 높은 프로세스를 확인해줘")),
-        ("🔍", tr("에러 로그 분석"), tr("최근 시스템 에러 로그 확인해줘")),
-    ];
-    let items = presets.into_iter().map(|(icon, label, prompt)| {
-        button(text(format!("{icon} {label}")).size(11))
-            .padding([4, 10])
-            .on_press_maybe((!busy).then(|| Message::AiSuggest(id, prompt.to_string(), false)))
-            .style(|_, st| {
-                let hover = matches!(st, button::Status::Hovered);
-                button::Style {
-                    background: Some(Background::Color(if hover { theme::BG_3 } else { theme::BG_2 })),
-                    text_color: if hover { theme::ACCENT_HI } else { theme::SLATE_300 },
-                    border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_PILL.into() },
-                    ..Default::default()
-                }
-            })
-            .into()
-    });
-    let strip = scrollable(row(items.collect::<Vec<El<'_>>>()).spacing(6))
-        .direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::hidden()))
-        .width(Length::Fill);
-    container(strip).padding(Padding { top: 0.0, right: 14.0, bottom: 8.0, left: 14.0 }).into()
-}
-
+/// An attachment's label, marked with a paperclip.
 fn chip<'a>(label: String) -> El<'a> {
-    container(text(label).size(11).color(theme::TEXT_2))
+    container(row![crate::icons::tinted(&PAPERCLIP, 11.0, theme::TEXT_2), text(label).size(11).color(theme::TEXT_2)].spacing(5).align_y(Alignment::Center))
         .padding([2, 8])
         .style(|_| container::Style {
             background: Some(Background::Color(theme::BG_0)),
@@ -356,7 +327,7 @@ const USER_BUBBLE_W: f32 = 300.0;
 fn user_turn(t: &Turn) -> El<'_> {
     let mut col = column![].spacing(6);
     if let Some(a) = &t.attachment {
-        col = col.push(chip(format!("📎 {a}")));
+        col = col.push(chip(a.to_string()));
     }
     col = col.push(text(t.text.clone()).size(13).color(theme::ON_ACCENT).line_height(1.625));
     // The user's side: an accent bubble on the right, as wide as its text.
@@ -804,7 +775,7 @@ fn composer<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
         let masked = if a.secrets > 0 { tf(" · 마스킹 {0}", &[&a.secrets]) } else { String::new() };
         card = card.push(
             row![
-                chip(format!("📎 {}{masked}", a.label)),
+                chip(format!("{}{masked}", a.label)),
                 button(crate::icons::tinted(&X, 11.0, theme::TEXT_3)).padding(3).style(crate::ui::btn_style(Btn::Ghost)).on_press(Message::AiDetach(id)),
             ]
             .align_y(Alignment::Center),
@@ -953,7 +924,7 @@ fn advanced(s: &Settings) -> El<'_> {
         + usize::from(!a.extra_body.is_empty());
     let title = if count > 0 { tf("고급 설정 ({0})", &[&count]) } else { tr("고급 설정").to_string() };
     let toggle = button(
-        row![text(if s.advanced_open { "▾" } else { "▸" }).size(10).color(theme::TEXT_3), text(title).size(12).color(theme::TEXT_2)]
+        row![crate::icons::tinted(if s.advanced_open { &CHEVRON_DOWN } else { &CHEVRON_RIGHT }, 10.0, theme::TEXT_3), text(title).size(12).color(theme::TEXT_2)]
             .spacing(6)
             .align_y(Alignment::Center),
     )
@@ -1061,7 +1032,7 @@ pub fn settings_page(s: &Settings) -> El<'_> {
             }),
         )
     });
-    let list = list.push(btn(tr("+ 프로필 추가"), Btn::Ghost, Some(Message::AiSettingsAdd)));
+    let list = list.push(crate::ui::icon_text_btn(&PLUS, tr("프로필 추가"), Btn::Ghost, Some(Message::AiSettingsAdd)));
 
     let label = |t: &str| text(t.to_string()).size(11.5).color(theme::TEXT_2);
     let (key_text, key_color) = key_status_text(s);
@@ -1076,8 +1047,8 @@ pub fn settings_page(s: &Settings) -> El<'_> {
         model_row = model_row.push(pick_list(s.models.clone(), sel, Message::AiSettingsModel).text_size(12).padding([5, 8]).style(crate::ui::pick_style).menu_style(crate::ui::menu_style));
     }
     let status: El<'_> = match &s.status {
-        Some(Ok(m)) => text(format!("✓ {m}")).size(11.5).color(theme::OK).into(),
-        Some(Err(e)) => text(format!("✗ {e}")).size(11.5).color(theme::ERR_TX).into(),
+        Some(Ok(m)) => row![crate::icons::tinted(&CHECK, 12.0, theme::OK), text(m.clone()).size(11.5).color(theme::OK)].spacing(5).align_y(Alignment::Center).into(),
+        Some(Err(e)) => row![crate::icons::tinted(&X, 12.0, theme::ERR_TX), text(e.clone()).size(11.5).color(theme::ERR_TX)].spacing(5).align_y(Alignment::Center).into(),
         None => Space::new().into(),
     };
     let form = column![

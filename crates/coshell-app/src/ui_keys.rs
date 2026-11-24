@@ -5,10 +5,10 @@ use iced::{Alignment, Background, Border, Length, Padding};
 
 use crate::app::{CoShell, HostField, KeyImport, Message};
 use crate::i18n::{tf, tr};
-use crate::icons::{COPY, KEY, TRASH};
+use crate::icons::{CHECK, COPY, KEY, PLUS, TRASH};
 use crate::keys::{SshKey, display_path, expand};
 use crate::theme::{self, alpha};
-use crate::ui::{Btn, El, R_CARD, R_CONTROL, btn, card_style, icon_btn, input_style, muted};
+use crate::ui::{Btn, El, R_CARD, R_CONTROL, btn, card_style, icon_btn, icon_text_btn, input_style, muted};
 
 const CARD_W: f32 = 300.0;
 const IMPORT_W: f32 = 560.0;
@@ -75,7 +75,7 @@ pub fn page(app: &CoShell) -> El<'_> {
         text(tr("SSH 키")).size(13),
         muted(tf("{0}개", &[&app.keys.len()])),
         Space::new().width(Length::Fill),
-        btn(tr("+ 키 가져오기"), Btn::Primary, Some(Message::KeyImportOpen)),
+        icon_text_btn(&PLUS, tr("키 가져오기"), Btn::Primary, Some(Message::KeyImportOpen)),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -83,7 +83,7 @@ pub fn page(app: &CoShell) -> El<'_> {
         container(
             column![
                 text(tr("저장된 키가 없습니다")).size(13),
-                muted(tr("‘+ 키 가져오기’로 서버 접속에 쓰는 개인 키를 추가하세요.")),
+                muted(tr("‘키 가져오기’로 서버 접속에 쓰는 개인 키를 추가하세요.")),
             ]
             .spacing(6)
             .align_x(Alignment::Center),
@@ -129,12 +129,12 @@ pub fn import_dialog(k: &KeyImport, composing: bool) -> El<'_> {
         });
     let (status, public): (El<'_>, El<'_>) = match &k.info {
         Some(Ok(i)) => {
-            let mut s = tf("✓ {0} 키", &[&i.algorithm]);
+            let mut s = tf("{0} 키", &[&i.algorithm]);
             if i.encrypted {
                 s.push_str(tr(" · 암호로 보호됨"));
             }
             (
-                text(s).size(11.5).color(theme::OK).into(),
+                row![crate::icons::tinted(&CHECK, 12.0, theme::OK), text(s).size(11.5).color(theme::OK)].spacing(5).align_y(Alignment::Center).into(),
                 match &i.public {
                     Some(p) => container(text(p.clone()).size(11).font(crate::fonts::MONO).color(theme::TEXT_2))
                         .padding([8, 10])

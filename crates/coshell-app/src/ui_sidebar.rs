@@ -1,33 +1,37 @@
-//! Left sidebar: servers grouped like a tree, built-in snippets, the active
-//! session card and a footer (server count, version).
+//! Left sidebar: servers grouped like a tree, snippets and the active
+//! session card.
 
-use crate::i18n::{tf, tr};
+use crate::i18n::tr;
 use iced::widget::{Space, button, column, container, mouse_area, row, svg, text, text_input};
 use iced::{Alignment, Background, Border, Color, Length, Padding};
 
-use crate::app::{CoShell, Message, Phase, SIDEBAR_SEARCH_INPUT, SidebarTab};
+use crate::app::{CoShell, Message, Phase, SIDEBAR_SEARCH_INPUT, SidebarTab, SnippetEditor, SnippetField};
 use crate::context_menu::ContextMenu;
 use crate::hosts::Env;
-use crate::icons::{CHEVRON_DOWN, PLUG, PLUS, SEARCH, UNPLUG};
+use crate::icons::{CHEVRON_DOWN, PENCIL, PLUG, PLUS, SEARCH, UNPLUG};
+use crate::settings::Snippet;
 use crate::theme::{self, alpha};
-use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn_style, dot, fill, kbd, mono, muted};
+use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn, btn_style, card_style, dot, fill, input_style, mono, muted};
 
-/// A ready-made read-only command: typed into the terminal, optionally with Enter.
-pub struct Snippet {
-    pub title: &'static str,
-    pub category: &'static str,
-    pub cmd: &'static str,
+/// Ready-made read-only commands (title, category, command), shown until the list is edited.
+const BUILTIN_SNIPPETS: &[(&str, &str, &str)] = &[
+    ("디스크 사용량", "진단", "df -h"),
+    ("로그 디렉터리 용량", "진단", "du -h -d 1 /var/log 2>/dev/null | sort -rh | head -n 10"),
+    ("CPU 점유 상위 프로세스", "성능", "ps aux --sort=-%cpu | head -n 6"),
+    ("메모리 & 스왑 상태", "성능", "free -h"),
+    ("가동 시간 & 부하", "성능", "uptime"),
+    ("최근 시스템 에러 로그", "장애", "journalctl -p err -n 20 --no-pager"),
+    ("열린 포트", "네트워크", "ss -tlnp"),
+];
+
+/// The built-in snippets in the current language.
+pub fn builtin_snippets() -> Vec<Snippet> {
+    BUILTIN_SNIPPETS.iter().map(|(title, category, cmd)| Snippet { title: tr(title).into(), category: tr(category).into(), cmd: (*cmd).into() }).collect()
 }
 
-pub const SNIPPETS: &[Snippet] = &[
-    Snippet { title: "디스크 사용량", category: "진단", cmd: "df -h" },
-    Snippet { title: "로그 디렉터리 용량", category: "진단", cmd: "du -h -d 1 /var/log 2>/dev/null | sort -rh | head -n 10" },
-    Snippet { title: "CPU 점유 상위 프로세스", category: "성능", cmd: "ps aux --sort=-%cpu | head -n 6" },
-    Snippet { title: "메모리 & 스왑 상태", category: "성능", cmd: "free -h" },
-    Snippet { title: "가동 시간 & 부하", category: "성능", cmd: "uptime" },
-    Snippet { title: "최근 시스템 에러 로그", category: "장애", cmd: "journalctl -p err -n 20 --no-pager" },
-    Snippet { title: "열린 포트", category: "네트워크", cmd: "ss -tlnp" },
-];
+/// The pencil on a snippet card.
+pub const SNIPPET_EDIT: &str = "sidebar-snippet-edit";
+const SNIPPET_EDITOR_W: f32 = 460.0;
 
 /// Width of a host's right-click menu.
 const HOST_MENU_W: f32 = 140.0;
@@ -40,7 +44,7 @@ pub fn sidebar(app: &CoShell) -> El<'_> {
         SidebarTab::Snippets => snippets(app),
         // The file panel has its own path bar instead of the search field.
         SidebarTab::Files => {
-            let col = column![head(app), container(crate::ui_files::panel(app)).height(Length::Fill), crate::ui::rule(true), footer(app)];
+            let col = column![head(app), container(crate::ui_files::panel(app)).height(Length::Fill)];
             return container(col).width(app.settings.sidebar_width).height(Length::Fill).style(fill(theme::SIDEBAR)).into();
         }
     };
@@ -63,7 +67,6 @@ pub fn sidebar(app: &CoShell) -> El<'_> {
     if let Some(card) = resource_card(app) {
         col = col.push(container(card).padding(Padding { top: 0.0, right: 12.0, bottom: 12.0, left: 12.0 }));
     }
-    col = col.push(crate::ui::rule(true)).push(footer(app));
     container(col).width(app.settings.sidebar_width).height(Length::Fill).style(fill(theme::SIDEBAR)).into()
 }
 
@@ -100,10 +103,14 @@ fn head(app: &CoShell) -> El<'_> {
         });
         crate::ui::tip(b, label, iced::widget::tooltip::Position::Bottom)
     };
+    let add = match app.sidebar_tab {
+        SidebarTab::Snippets => icon(&PLUS, 16.0, tr("스니펫 추가"), Message::SnippetNew),
+        _ => icon(&PLUS, 16.0, tr("새 호스트 추가"), Message::HostNewIn(None)),
+    };
     container(
         row![
             switch,
-            icon(&PLUS, 16.0, tr("새 호스트 추가"), Message::HostNewIn(None)),
+            add,
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -294,17 +301,24 @@ fn snippets(app: &CoShell) -> El<'_> {
     let live = app.live_tab().is_some() && !app.host_view;
     let mut col = column![].spacing(8);
     let mut any = false;
-    for (i, sn) in SNIPPETS.iter().enumerate() {
-        let (title, category) = (tr(sn.title), tr(sn.category));
-        if !q.is_empty() && ![title, category, sn.cmd].iter().any(|s| s.to_lowercase().contains(&q)) {
+    for (i, sn) in app.snippets().into_iter().enumerate() {
+        if !q.is_empty() && ![&sn.title, &sn.category, &sn.cmd].iter().any(|s| s.to_lowercase().contains(&q)) {
             continue;
         }
         any = true;
-        let tag = container(text(category).size(10).color(theme::TEXT_2)).padding([1, 6]).style(|_| container::Style {
-            background: Some(Background::Color(theme::CHIP)),
-            border: Border { radius: 6.0.into(), ..Default::default() },
-            ..Default::default()
-        });
+        let tag: El<'_> = if sn.category.is_empty() {
+            Space::new().into()
+        } else {
+            container(text(sn.category).size(10).color(theme::TEXT_2))
+                .padding([1, 6])
+                .style(|_| container::Style {
+                    background: Some(Background::Color(theme::CHIP)),
+                    border: Border { radius: 6.0.into(), ..Default::default() },
+                    ..Default::default()
+                })
+                .into()
+        };
+        let edit = button(crate::icons::tinted(&PENCIL, 11.0, theme::TEXT_3)).padding(4).style(btn_style(Btn::Ghost)).on_press(Message::SnippetEdit(i));
         let small = |label: &'static str, primary: bool, msg: Option<Message>| {
             button(text(tr(label)).size(10.5)).padding([2, 9]).on_press_maybe(msg).style(crate::ui::tint_style(
                 if primary { theme::ACCENT_TX } else { theme::TEXT_2 },
@@ -312,14 +326,16 @@ fn snippets(app: &CoShell) -> El<'_> {
             ))
         };
         let card = column![
-            row![text(title).size(12).font(SEMIBOLD).color(theme::TEXT).width(Length::Fill), tag].spacing(8).align_y(Alignment::Center),
+            row![text(sn.title).size(12).font(SEMIBOLD).color(theme::TEXT).width(Length::Fill), tag].spacing(8).align_y(Alignment::Center),
             container(mono(format!("$ {}", sn.cmd), 11.0, theme::ACCENT_TX)).width(Length::Fill).clip(true),
             row![
+                container(crate::ui::tip(edit, tr("편집"), iced::widget::tooltip::Position::Top)).id(SNIPPET_EDIT),
                 Space::new().width(Length::Fill),
                 small("입력", false, live.then_some(Message::Snippet(i, false))),
                 small("실행", true, live.then_some(Message::Snippet(i, true))),
             ]
-            .spacing(6),
+            .spacing(6)
+            .align_y(Alignment::Center),
         ]
         .spacing(6);
         col = col.push(container(card).padding(10).width(Length::Fill).style(|_| container::Style {
@@ -329,12 +345,58 @@ fn snippets(app: &CoShell) -> El<'_> {
         }));
     }
     if !any {
-        return container(muted(tr("일치하는 스니펫이 없습니다"))).center_x(Length::Fill).padding(28).into();
+        let none = if q.is_empty() { tr("저장된 스니펫이 없습니다") } else { tr("일치하는 스니펫이 없습니다") };
+        return container(muted(none)).center_x(Length::Fill).padding(28).into();
     }
     if !live {
         col = col.push(container(muted(tr("세션을 열면 터미널에 바로 입력·실행됩니다"))).padding([4, 2]));
     }
     col.into()
+}
+
+/// Add or edit a snippet: name, category, command. Deleting asks twice.
+pub fn snippet_editor(ed: &SnippetEditor) -> El<'_> {
+    let label = |s: &'static str| text(tr(s)).size(11.5).color(theme::TEXT_2);
+    let input = |placeholder: &'static str, value: &str, f: SnippetField| {
+        text_input(tr(placeholder), value)
+            .on_input(move |v| Message::SnippetField(f, v))
+            .on_submit(Message::SnippetSave)
+            .size(12.5)
+            .padding([7, 10])
+            .style(input_style)
+    };
+    let d = &ed.draft;
+    let mut col = column![
+        text(if ed.index.is_some() { tr("스니펫 편집") } else { tr("새 스니펫") }).size(14),
+        Space::new().height(2),
+        row![
+            column![label("이름"), input("예: 디스크 사용량", &d.title, SnippetField::Title)].spacing(6).width(Length::FillPortion(2)),
+            column![label("분류"), input("예: 진단", &d.category, SnippetField::Category)].spacing(6).width(Length::FillPortion(1)),
+        ]
+        .spacing(10),
+        Space::new().height(2),
+        label("명령"),
+        input("예: df -h", &d.cmd, SnippetField::Cmd).font(crate::fonts::MONO),
+    ]
+    .spacing(6);
+    if let Some(e) = &ed.error {
+        col = col.push(text(e.clone()).size(11.5).color(theme::ERR_TX));
+    }
+    let delete: El<'_> = match (ed.index, ed.confirm_delete) {
+        (None, _) => Space::new().into(),
+        (Some(_), true) => btn(tr("정말 삭제"), Btn::Danger, Some(Message::SnippetDelete)),
+        (Some(_), false) => btn(tr("스니펫 삭제"), Btn::Ghost, Some(Message::SnippetDeleteAsk)),
+    };
+    col = col.push(Space::new().height(6)).push(
+        row![
+            delete,
+            Space::new().width(Length::Fill),
+            btn(tr("취소"), Btn::Ghost, Some(Message::SnippetEditorClose)),
+            btn(tr("저장"), Btn::Primary, Some(Message::SnippetSave)),
+        ]
+        .spacing(8),
+    );
+    container(col).padding(20).width(SNIPPET_EDITOR_W).style(card_style(theme::LINE_2)).into()
 }
 
 /// The active session's CPU, memory and disk as bars (polled live).
@@ -412,19 +474,4 @@ fn resource_card(app: &CoShell) -> Option<El<'_>> {
             })
             .into(),
     )
-}
-
-fn footer(app: &CoShell) -> El<'_> {
-    container(
-        row![
-            text(tf("{0}대 호스트 등록됨", &[&app.hosts.len()])).size(11).color(theme::TEXT_3),
-            Space::new().width(Length::Fill),
-            button(kbd(format!("v{}", crate::VERSION))).padding(0).style(btn_style(Btn::Ghost)).on_press(Message::About),
-        ]
-        .align_y(Alignment::Center),
-    )
-    .padding([0, 14])
-    .height(36)
-    .center_y(36)
-    .into()
 }

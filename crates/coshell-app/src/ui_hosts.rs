@@ -8,7 +8,8 @@ use crate::ai::Attachment;
 use crate::app::{CoShell, HostEditor, HostField, HostTab, Message};
 use crate::hosts::Env;
 use crate::theme::{self, alpha};
-use crate::ui::{Btn, El, btn, btn_style, card_style, input_style, mono, muted};
+use crate::icons::{ARROW_DOWN, MINUS, PLUS, X};
+use crate::ui::{Btn, El, btn, btn_style, card_style, icon_text_btn, input_style, mono, muted};
 
 const EDITOR_W: f32 = 620.0;
 /// Height of the form; longer content scrolls so the buttons stay put.
@@ -110,9 +111,10 @@ fn password_field(ed: &HostEditor) -> El<'_> {
     column![text(tr("비밀번호")).size(11.5).color(theme::TEXT_2), line, muted(note)].spacing(4).into()
 }
 
-fn hop_btn<'a>(label: &'a str, msg: Option<Message>) -> El<'a> {
-    button(text(label).size(13).width(Length::Fill).align_x(Alignment::Center))
-        .padding([3, 0])
+fn hop_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>, msg: Option<Message>) -> El<'a> {
+    let color = if msg.is_some() { theme::TEXT } else { alpha(theme::TEXT, 0.4) };
+    button(container(crate::icons::tinted(icon, 12.0, color)).center_x(Length::Fill))
+        .padding([5, 0])
         .width(28)
         .style(btn_style(Btn::Plain))
         .on_press_maybe(msg)
@@ -120,7 +122,7 @@ fn hop_btn<'a>(label: &'a str, msg: Option<Message>) -> El<'a> {
 }
 
 fn down_arrow<'a>() -> El<'a> {
-    row![container(text("↓").size(13).color(theme::TEXT_3)).center_x(Length::Fill), Space::new().width(HOP_BTNS_W)].into()
+    row![container(crate::icons::tinted(&ARROW_DOWN, 12.0, theme::TEXT_3)).center_x(Length::Fill), Space::new().width(HOP_BTNS_W)].into()
 }
 
 /// Jump servers in order (first hop on top), ending at the server being edited.
@@ -150,8 +152,8 @@ fn jump_chain<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
             .style(crate::ui::pick_style)
             .menu_style(crate::ui::menu_style);
         let buttons = row![
-            hop_btn("+", picked.is_some().then_some(Message::HostJumpAdd(i))),
-            hop_btn("−", (i < ed.jumps.len()).then_some(Message::HostJumpRemove(i))),
+            hop_btn(&PLUS, picked.is_some().then_some(Message::HostJumpAdd(i))),
+            hop_btn(&MINUS, (i < ed.jumps.len()).then_some(Message::HostJumpRemove(i))),
         ]
         .spacing(8)
         .width(HOP_BTNS_W);
@@ -293,8 +295,8 @@ fn tunnels_tab(ed: &HostEditor) -> El<'_> {
                     text(kind).size(11).color(theme::ACCENT),
                     mono(desc, 11.5, theme::TEXT),
                     Space::new().width(Length::Fill),
-                    button(text("×").size(12).color(theme::TEXT_3))
-                        .padding([0, 6])
+                    button(crate::icons::tinted(&X, 11.0, theme::TEXT_3))
+                        .padding(4)
                         .style(btn_style(Btn::Ghost))
                         .on_press(Message::HostForwardRemove(i)),
                 ]
@@ -314,7 +316,7 @@ fn tunnels_tab(ed: &HostEditor) -> El<'_> {
         container(
             column![
                 crate::ui_tunnel::builder(&ed.tunnel),
-                row![Space::new().width(Length::Fill), btn(tr("+ 터널 추가"), Btn::Plain, ready.then_some(Message::TunnelAdd))],
+                row![Space::new().width(Length::Fill), icon_text_btn(&PLUS, tr("터널 추가"), Btn::Plain, ready.then_some(Message::TunnelAdd))],
             ]
             .spacing(8),
         )
@@ -361,7 +363,6 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
             Space::new().width(Length::Fill),
             btn(tr("취소"), Btn::Ghost, Some(Message::HostEditorClose)),
             btn(tr("저장"), Btn::Plain, Some(Message::HostSave(false))),
-            btn(tr("저장하고 연결"), Btn::Primary, Some(Message::HostSave(true))),
         ]
         .spacing(8),
     );
