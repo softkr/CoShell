@@ -849,14 +849,11 @@ fn status_bar(app: &CoShell) -> El<'_> {
                 .into(),
         );
     }
-    right.push(sep());
     // The sidebar lists the servers while it is open.
     if !app.settings.sidebar_open {
+        right.push(sep());
         right.push(small(tf("서버 {0}", &[&app.hosts.len()]), theme::TEXT_3));
     }
-    right.push(
-        button(text(format!("v{}", crate::VERSION)).size(11).color(theme::TEXT_3)).padding([1, 6]).style(btn_style(Btn::Ghost)).on_press(Message::About).into(),
-    );
     let bar = row![
         row(left).spacing(10).align_y(Alignment::Center),
         Space::new().width(Length::Fill),

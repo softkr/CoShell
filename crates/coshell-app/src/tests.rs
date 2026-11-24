@@ -726,15 +726,14 @@ fn new_server_dialog_copy() {
 }
 
 #[test]
-fn version_is_shown_in_status_bar_and_about() {
+fn version_is_shown_only_in_about() {
     let v = env!("CARGO_PKG_VERSION");
     assert_eq!(crate::VERSION, v);
     let mut app = app();
-    let mut ui = simulator(ui::view(&app));
-    ui.click(format!("v{v}")).expect("status bar version");
-    for m in ui.into_messages() {
-        let _ = app.update(m);
-    }
+    assert!(simulator(ui::view(&app)).find(format!("v{v}")).is_err(), "not in the main window");
+    app.settings.sidebar_open = false;
+    assert!(simulator(ui::view(&app)).find(format!("v{v}")).is_err(), "not in the status bar either");
+    let _ = app.update(Message::About);
     assert!(app.about);
     let mut ui = simulator(ui::view(&app));
     ui.find(format!("버전 {v}")).expect("about dialog");
