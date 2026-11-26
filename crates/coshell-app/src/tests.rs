@@ -2609,3 +2609,20 @@ fn block_output_can_be_selected_and_copied() {
     ui.simulate([copy()]);
     assert_eq!(copied(ui), vec!["packages".to_string()]);
 }
+
+/// The filled part of a resource bar spans `val` percent of the track, including at 0 and 100.
+#[test]
+fn resource_meter_fills_its_share() {
+    use iced::advanced::widget::Tree;
+    use iced::advanced::{Layout, layout};
+    for val in [0u8, 1, 56, 99, 100] {
+        let mut el: iced::Element<'_, (), iced::Theme, ()> = crate::ui_sidebar::meter(val, iced::Color::WHITE);
+        let mut tree = Tree::new(el.as_widget());
+        let node = el.as_widget_mut().layout(&mut tree, &(), &layout::Limits::new(iced::Size::ZERO, iced::Size::new(400.0, 6.0)));
+        let widths: Vec<f32> = Layout::new(&node).children().map(|c| c.bounds().width).collect();
+        let fill = 4.0 * f32::from(val);
+        let want: Vec<f32> = [fill, 400.0 - fill].into_iter().filter(|w| *w > 0.0).collect();
+        assert_eq!(widths.len(), want.len(), "{val}%: {widths:?}");
+        assert!(widths.iter().zip(&want).all(|(a, b)| (a - b).abs() <= 1.0), "{val}%: {widths:?}, want {want:?}");
+    }
+}

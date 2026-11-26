@@ -399,6 +399,22 @@ pub fn snippet_editor(ed: &SnippetEditor) -> El<'_> {
     container(col).padding(20).width(SNIPPET_EDITOR_W).style(card_style(theme::LINE_2)).into()
 }
 
+/// The filled part of a resource bar: `val` percent of the width in `color`.
+/// A zero-width part is left out: iced lays out `FillPortion(0)` at the full width.
+pub(crate) fn meter<'a, M: 'a, R: iced::advanced::Renderer + 'a>(val: u8, color: Color) -> iced::Element<'a, M, iced::Theme, R> {
+    let filled = u16::from(val.min(100));
+    row![]
+        .push((filled > 0).then(|| {
+            container(Space::new()).width(Length::FillPortion(filled)).height(6).style(move |_| container::Style {
+                background: Some(Background::Color(color)),
+                border: Border { radius: 3.0.into(), ..Default::default() },
+                ..Default::default()
+            })
+        }))
+        .push((filled < 100).then(|| Space::new().width(Length::FillPortion(100 - filled))))
+        .into()
+}
+
 /// The active session's CPU, memory and disk as bars (polled live).
 fn resource_card(app: &CoShell) -> Option<El<'_>> {
     let t = app.active_tab().filter(|_| !app.host_view)?;
@@ -413,23 +429,13 @@ fn resource_card(app: &CoShell) -> Option<El<'_>> {
             theme::OK
         };
         let value = v.map_or("—".to_string(), |x| format!("{x}%"));
-        let fill_w = f32::from(val) / 100.0;
         column![
             row![
                 text(label).size(11).font(crate::ui::MEDIUM).color(theme::TEXT_2),
                 Space::new().width(Length::Fill),
                 text(value).size(11).font(if val >= 85 { crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Semibold) } else { crate::fonts::MONO }).color(if val >= 85 { theme::WARN } else { theme::TEXT }),
             ],
-            container(
-                row![
-                    container(Space::new()).width(Length::FillPortion((fill_w * 1000.0) as u16)).height(6).style(move |_| container::Style {
-                        background: (val > 0).then_some(Background::Color(color)),
-                        border: Border { radius: 3.0.into(), ..Default::default() },
-                        ..Default::default()
-                    }),
-                    Space::new().width(Length::FillPortion(((1.0 - fill_w) * 1000.0) as u16)),
-                ]
-            )
+            container(meter(val, color))
             .height(6)
             .width(Length::Fill)
             .clip(true)
