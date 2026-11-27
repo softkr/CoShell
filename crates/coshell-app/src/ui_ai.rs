@@ -12,8 +12,7 @@ use crate::ai::{Exec, ExecState, Settings, Turn};
 use crate::app::{CoShell, Message, Phase, Tab, TabId};
 use crate::assist::{self, Risk, Segment};
 use crate::theme::{self, alpha};
-use crate::icons::{CHECK, CHEVRON_DOWN, CHEVRON_RIGHT, COPY, PAPERCLIP, PENCIL, PLUS, X, ZAP};
-use crate::ui_status::Mark;
+use crate::icons::{CHECK, CHEVRON_DOWN, CHEVRON_RIGHT, COPY, PAPERCLIP, PENCIL, PLUS, X};
 use crate::ui::{Btn, El, SEMIBOLD, btn, icon_btn, input_style, mono, muted, tip};
 
 /// The first code block's run button (tests click it by this id).
@@ -132,28 +131,9 @@ pub(crate) fn sheet_tools<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
 }
 
 
-/// Message bubble: `bg` fill, thin border, rounded.
-fn bubble<'a>(content: impl Into<El<'a>>, bg: Color) -> El<'a> {
-    container(content)
-        .padding([10, 14])
-        .width(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(bg)),
-            border: Border { color: theme::LINE, width: 1.0, radius: iced::border::Radius { top_left: 6.0, top_right: 16.0, bottom_right: 16.0, bottom_left: 16.0 } },
-            text_color: Some(theme::TEXT),
-            ..Default::default()
-        })
-        .into()
-}
 
-/// Space between turns. Replies that follow one another draw their rail line through it.
+/// Space between turns.
 const TURN_GAP: f32 = 16.0;
-/// Width of the replies' status rail.
-const RAIL_W: f32 = crate::ui_status::DISC;
-/// Centre of a reply's status mark: level with the first line of its bubble, or with
-/// the working label when the reply has nothing else yet.
-const MARK_Y: f32 = 20.0;
-const MARK_Y_LABEL: f32 = 8.0;
 
 /// Widest the welcome's suggestions get in the chat sheet.
 const SHEET_WELCOME_W: f32 = 420.0;
@@ -167,7 +147,10 @@ pub(crate) fn sheet_conversation(tab: &Tab, guard: bool, fold: f32, max_height: 
     }
 }
 
-/// The turns so far, or `None` before the first question.
+/// The turns so far, or `None` before the first question: each question in a box of its
+/// own, and under it the reply as a timeline, a dot per step on one thin line: what it said
+/// (grey), each command it ran (green done, red failed, blue running), each it suggests (amber:
+/// yours to run) and what it is doing now.
 fn turns(tab: &Tab, guard: bool, fold: f32) -> Option<iced::widget::Column<'_, Message>> {
     let chat = &tab.chat;
     if chat.turns.is_empty() && chat.error.is_none() {
@@ -176,53 +159,94 @@ fn turns(tab: &Tab, guard: bool, fold: f32) -> Option<iced::widget::Column<'_, M
     // A command result fed back to the model is hidden: it shows on the command itself.
     let shown: Vec<usize> = (0..chat.turns.len()).filter(|&i| !chat.turns[i].hidden).collect();
     let newest = shown.iter().rev().copied().find(|&i| chat.turns[i].role == Role::Assistant);
-    let is_reply = |k: Option<usize>| k.and_then(|k| shown.get(k)).is_some_and(|&j| chat.turns[j].role == Role::Assistant);
-    let mut col = column![].padding(16);
-    for (k, &i) in shown.iter().enumerate() {
+    // The steps in order; a question breaks the line.
+    let mut items: Vec<(Option<Node>, El<'_>)> = Vec::new();
+    for &i in &shown {
         let t = &chat.turns[i];
-        let gap = if k + 1 < shown.len() || chat.error.is_some() { TURN_GAP } else { 0.0 };
-        col = col.push(match t.role {
-            Role::User => container(user_turn(t)).padding(Padding { bottom: gap, ..Padding::ZERO }).into(),
+        match t.role {
+            Role::User => items.push((None, user_turn(t))),
             Role::Assistant => {
                 let working = newest == Some(i) && chat.is_streaming();
-                let thinking = t.text.trim().is_empty() && !t.execs.iter().any(|e| e.state == ExecState::Running);
-                let mark = match (newest == Some(i), working) {
-                    (_, true) if thinking => Mark::Thinking(fold),
-                    (_, true) => Mark::Working(fold),
-                    (true, false) => Mark::Latest,
-                    (false, _) => Mark::Past,
-                };
-                let rail = Rail { mark, mark_y: MARK_Y, joined_above: is_reply(k.checked_sub(1)), joined_below: is_reply(Some(k + 1)) };
-                assistant_turn(tab, i, t, working.then_some(fold), guard, rail, gap)
+                items.extend(reply_steps(tab, i, t, working.then_some(fold), guard));
             }
-        });
+        }
     }
     if let Some(e) = &chat.error {
-        col = col.push(error_card(tab.id, e));
+        items.push((Some(Node::still(theme::ERR)), error_card(tab.id, e)));
+    }
+    let nodes: Vec<bool> = items.iter().map(|(node, _)| node.is_some()).collect();
+    let n = items.len();
+    let mut col = column![].padding(Padding { top: 16.0, right: 16.0, bottom: 16.0, left: 12.0 });
+    for (k, (node, content)) in items.into_iter().enumerate() {
+        let up = k > 0 && nodes[k - 1];
+        let down = k + 1 < n && nodes[k + 1];
+        let gap = Space::new().height(if k + 1 == n { 0.0 } else if node.is_some() && down { STEP_GAP } else { TURN_GAP });
+        col = col.push(match node {
+            Some(node) => {
+                let line = iced::widget::canvas(Line { node, up, down }).width(LINE_W).height(Length::Fill);
+                El::from(row![line, column![content, gap].width(Length::Fill)].spacing(10))
+            }
+            None => column![content, gap].into(),
+        });
     }
     Some(col)
 }
 
-/// A reply's status mark, and whether a line joins it to the reply before / after it.
-struct Rail {
-    mark: Mark,
-    /// Centre of the mark below the turn's top.
-    mark_y: f32,
-    joined_above: bool,
-    joined_below: bool,
+/// Space between the steps of a reply, and around a question.
+const STEP_GAP: f32 = 14.0;
+/// The timeline's column, and how far down a step its dot sits (level with its first line).
+const LINE_W: f32 = 14.0;
+const DOT_Y: f32 = 11.0;
+const DOT_R: f32 = 3.5;
+
+/// A step's dot: its colour, and the moment of its pulse while it is going on.
+#[derive(Clone, Copy)]
+struct Node {
+    colour: Color,
+    pulse: Option<f32>,
 }
 
-fn rail<'a>(r: Rail) -> El<'a> {
-    let line = |height: Length, on: bool| -> El<'a> {
-        container(Space::new()).width(1).height(height).style(crate::ui::fill(if on { theme::LINE_2 } else { Color::TRANSPARENT })).into()
-    };
-    let above = (r.mark_y - crate::ui_status::DISC / 2.0).max(0.0);
-    column![line(Length::Fixed(above), r.joined_above), crate::ui_status::mark(r.mark), line(Length::Fill, r.joined_below)]
-        .width(RAIL_W)
-        .height(Length::Fill)
-        .align_x(Alignment::Center)
-        .into()
+impl Node {
+    fn still(colour: Color) -> Self {
+        Self { colour, pulse: None }
+    }
 }
+
+/// A step's piece of the timeline: the line through it (joined to the steps above and below)
+/// and its dot, which sends out a ring while the step is going on.
+struct Line {
+    node: Node,
+    up: bool,
+    down: bool,
+}
+
+impl iced::widget::canvas::Program<Message> for Line {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &iced::Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::Point;
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let x = (bounds.width / 2.0).round() + 0.5;
+        let rule = Stroke::default().with_width(1.0).with_color(theme::LINE_2);
+        if self.up {
+            frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, DOT_Y - DOT_R - 3.0)), rule);
+        }
+        if self.down {
+            frame.stroke(&Path::line(Point::new(x, DOT_Y + DOT_R + 3.0), Point::new(x, bounds.height)), rule);
+        }
+        let c = Point::new(x, DOT_Y);
+        if let Some(t) = self.node.pulse {
+            let ring = (t / STEP_PULSE).fract();
+            frame.stroke(&Path::circle(c, DOT_R + 5.0 * ring), Stroke::default().with_width(1.2).with_color(alpha(self.node.colour, 0.7 * (1.0 - ring))));
+        }
+        frame.fill(&Path::circle(c, DOT_R), self.node.colour);
+        vec![frame.into_geometry()]
+    }
+}
+
+/// How often a step that is going on sends out a ring (s).
+const STEP_PULSE: f32 = 1.2;
 
 /// What the working reply is doing, with dots that count up as the fold turns.
 fn working_label<'a>(t: &Turn, fold: f32) -> El<'a> {
@@ -303,23 +327,23 @@ fn chip<'a>(label: String) -> El<'a> {
         .into()
 }
 
-/// Widest a question's bubble gets before it wraps.
-const USER_BUBBLE_W: f32 = 300.0;
-
 fn user_turn(t: &Turn) -> El<'_> {
     let mut col = column![].spacing(6);
     if let Some(a) = &t.attachment {
         col = col.push(chip(a.to_string()));
     }
-    col = col.push(text(t.text.clone()).size(13).color(theme::ON_ACCENT).line_height(1.625));
-    // The user's side: an accent bubble on the right, as wide as its text.
-    let bubble = container(col).padding([9, 14]).max_width(USER_BUBBLE_W).style(|_| container::Style {
-        background: Some(Background::Color(theme::ACCENT)),
-        border: Border { radius: iced::border::Radius { top_left: 16.0, top_right: 6.0, bottom_right: 16.0, bottom_left: 16.0 }, ..Default::default() },
-        text_color: Some(theme::ON_ACCENT),
-        ..Default::default()
-    });
-    row![Space::new().width(Length::Fill), bubble].into()
+    col = col.push(text(t.text.clone()).size(13).color(theme::TEXT).line_height(1.625));
+    // A question: a box across the conversation, the reply's timeline under it.
+    container(col)
+        .padding([10, 14])
+        .width(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(Background::Color(alpha(Color::WHITE, 0.035))),
+            border: Border { color: theme::LINE_2, width: 1.0, radius: 10.0.into() },
+            text_color: Some(theme::TEXT),
+            ..Default::default()
+        })
+        .into()
 }
 
 const BOLD: Font = Font { weight: iced::font::Weight::Semibold, ..crate::fonts::SANS };
@@ -471,7 +495,8 @@ fn card_btn<'a>(content: impl Into<El<'a>>, msg: Option<Message>) -> button::But
     })
 }
 
-/// A command the assistant ran (or ▶ ran): `>_ cmd · 해석 · ✓ 실행 완료`; the output opens on click.
+/// A command that was run, as a step: `실행  cmd` with 해석 and its status, then a panel of
+/// what went in (IN) and what came out (OUT: the first lines, all of it on click).
 fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a> {
     let (color, status, done) = match &e.state {
         ExecState::Running => (theme::INFO, tr("실행 중…").to_string(), false),
@@ -480,51 +505,48 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a>
         ExecState::Done { exit: Some(code), .. } => (theme::WARN, tf("종료 코드 {0}", &[code]), true),
         ExecState::Failed(_) => (theme::ERR_TX, tr("실행하지 못함").to_string(), false),
     };
-    let badge = container(
-        row![crate::icons::tinted(if done { &CHECK } else { &ZAP }, 12.0, color), text(status).size(11).font(crate::ui::MEDIUM).color(color)]
-            .spacing(4)
-            .align_y(Alignment::Center),
-    )
-    .padding([3, 8])
-    .style(move |_| container::Style {
-        background: Some(Background::Color(alpha(color, 0.15))),
-        border: Border { color: alpha(color, 0.3), width: 1.0, radius: 6.0.into() },
-        ..Default::default()
-    });
     let interpret = tf("방금 실행한 `{0}` 결과를 해석하고 다음 단계를 알려줘.", &[&e.cmd]);
-    let mut actions = row![].spacing(4).align_y(Alignment::Center);
+    let mut head = row![
+        text(if e.manual { tr("실행") } else { tr("조회") }).size(13).font(SEMIBOLD).color(theme::TEXT),
+        container(text(e.cmd.lines().next().unwrap_or("").to_string()).size(12.5).color(theme::TEXT_2).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
     if done {
-        actions = actions.push(tip(
+        head = head.push(tip(
             card_btn(text(tr("해석")).size(10), (!tab.chat.is_streaming()).then(|| Message::AiSuggest(tab.id, interpret, false))),
             tr("AI에게 결과 해석 요청"),
             iced::widget::tooltip::Position::Top,
         ));
     }
-    actions = actions.push(badge);
-    let head = button(row![cmd_line(&e.cmd), actions].spacing(8).align_y(Alignment::Center))
+    head = head.push(text(status).size(11).font(crate::ui::MEDIUM).color(color));
+    // What went in and what came out, each under a small grey label.
+    let label = |s: &'static str| container(mono(s, 10.5, theme::TEXT_3)).width(IO_LABEL_W);
+    let input = row![label("IN"), container(mono(e.cmd.clone(), 11.5, theme::TEXT)).width(Length::Fill)].padding([8, 12]);
+    let out_text = match &e.state {
+        ExecState::Done { output, .. } if output.trim().is_empty() => tr("(출력 없음)").to_string(),
+        ExecState::Done { output, .. } => output.trim_end().to_string(),
+        ExecState::Failed(err) => err.clone(),
+        ExecState::Running => tr("실행 중…").to_string(),
+        ExecState::Typed => tr("터미널에 입력함").to_string(),
+    };
+    let lines = out_text.lines().count();
+    let shown = if e.open || lines <= OUT_PREVIEW { out_text } else { format!("{}\n… {}", out_text.lines().take(OUT_PREVIEW).collect::<Vec<_>>().join("\n"), tf("{0}줄 더", &[&(lines - OUT_PREVIEW)])) };
+    let out_body: El<'a> = if e.open {
+        container(crate::ui::scroll(container(mono(shown, 11.0, theme::SLATE_300)).width(Length::Fill)).height(Length::Shrink)).max_height(EXEC_OUTPUT_MAX_H).into()
+    } else {
+        mono(shown, 11.0, theme::SLATE_300)
+    };
+    let output = button(row![label("OUT"), container(out_body).width(Length::Fill)])
         .width(Length::Fill)
-        .padding(10)
+        .padding([8, 12])
         .on_press(Message::AgentToggle(tab.id, index, run))
         .style(|_, st| button::Style {
-            background: Some(Background::Color(if matches!(st, button::Status::Hovered) { theme::BG_1 } else { alpha(theme::BG_0, 0.9) })),
-            border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_CARD.into() },
+            background: matches!(st, button::Status::Hovered).then_some(Background::Color(alpha(Color::WHITE, 0.03))),
             ..Default::default()
         });
-    let mut col = column![head].spacing(6);
-    if e.open {
-        let body = match &e.state {
-            ExecState::Done { output, .. } if output.trim().is_empty() => tr("(출력 없음)").to_string(),
-            ExecState::Done { output, .. } => output.clone(),
-            ExecState::Failed(err) => err.clone(),
-            ExecState::Running | ExecState::Typed => String::new(),
-        };
-        col = col.push(
-            container(crate::ui::scroll(container(mono(body, 11.0, theme::SLATE_300)).padding(10)).height(Length::Shrink))
-                .max_height(EXEC_OUTPUT_MAX_H)
-                .width(Length::Fill)
-                .style(cmd_card_style(theme::LINE)),
-        );
-    }
+    let panel = container(column![input, crate::ui::rule(true), output]).width(Length::Fill).clip(true).style(cmd_card_style(theme::LINE));
+    let mut col = column![head, panel].spacing(8);
     let waiting = tab.env == crate::hosts::Env::Prod && !e.sent && matches!(e.state, ExecState::Done { .. } | ExecState::Failed(_));
     if waiting {
         col = col.push(
@@ -540,49 +562,60 @@ fn exec_panel<'a>(tab: &'a Tab, index: usize, run: usize, e: &'a Exec) -> El<'a>
     col.into()
 }
 
-/// `working`: seconds into the fold cycle while this reply is being worked on.
-fn assistant_turn<'a>(tab: &'a Tab, index: usize, t: &'a Turn, working: Option<f32>, guard: bool, rail_: Rail, gap: f32) -> El<'a> {
-    // The design: one bubble with the reply, then a card per command.
-    let mut prose_text: Vec<String> = Vec::new();
-    let mut cards: Vec<El<'a>> = Vec::new();
+/// The IN / OUT labels' column, and how many lines of output show before it is opened.
+const IO_LABEL_W: f32 = 40.0;
+const OUT_PREVIEW: usize = 6;
+
+/// A reply's steps: what it says, then each of its commands (run or suggested), in the order
+/// it gave them; while it is being worked on (`working`: seconds into the cycle), what it is
+/// doing last.
+fn reply_steps<'a>(tab: &'a Tab, index: usize, t: &'a Turn, working: Option<f32>, guard: bool) -> Vec<(Option<Node>, El<'a>)> {
+    let mut steps: Vec<(Option<Node>, El<'a>)> = Vec::new();
+    let mut said: Vec<String> = Vec::new();
+    let flush = |said: &mut Vec<String>, steps: &mut Vec<(Option<Node>, El<'a>)>| {
+        if !said.is_empty() {
+            steps.push((Some(Node::still(theme::SLATE_300)), prose(&said.join("\n\n"))));
+            said.clear();
+        }
+    };
     for seg in assist::segments(&t.text) {
         match seg {
             Segment::Text(s) => {
                 if !s.trim().is_empty() {
-                    prose_text.push(s);
+                    said.push(s);
                 }
             }
             Segment::Code { lang, code, closed } => {
+                flush(&mut said, &mut steps);
                 // A command that was run shows its run (the latest) instead of a ▶ card.
                 let cmd = assist::command_text(&code);
-                cards.push(match t.execs.iter().enumerate().rev().find(|(_, e)| e.cmd == cmd) {
-                    Some((j, e)) => exec_panel(tab, index, j, e),
-                    None => command_card(tab, index, lang, code, closed, guard),
+                steps.push(match t.execs.iter().enumerate().rev().find(|(_, e)| e.cmd == cmd) {
+                    Some((j, e)) => (Some(exec_node(e, working)), exec_panel(tab, index, j, e)),
+                    None => (Some(Node::still(theme::WARN)), command_card(tab, index, lang, code, closed, guard)),
                 });
             }
         }
     }
-    let mut col = column![].spacing(8);
-    if !prose_text.is_empty() {
-        col = col.push(bubble(prose(&prose_text.join("\n\n")), theme::CARD));
-    }
-    let cards_empty = cards.is_empty();
-    for c in cards {
-        col = col.push(c);
-    }
+    flush(&mut said, &mut steps);
     if t.stopped {
-        col = col.push(muted(tr("응답을 중지했습니다")));
+        steps.push((Some(Node::still(theme::TEXT_3)), muted(tr("응답을 중지했습니다"))));
     }
-    let mut rail_ = rail_;
     if let Some(fold) = working {
-        if prose_text.is_empty() && cards_empty && !t.stopped {
-            rail_.mark_y = MARK_Y_LABEL;
-        }
-        col = col.push(working_label(t, fold));
+        steps.push((Some(Node { colour: theme::INFO, pulse: Some(fold) }), working_label(t, fold)));
     }
-    // The rail lies over the turn's left gutter, as tall as the turn and its gap.
-    let body = row![Space::new().width(RAIL_W), col.width(Length::Fill)].spacing(10).padding(Padding { bottom: gap, ..Padding::ZERO });
-    iced::widget::stack![body, rail(rail_)].into()
+    steps
+}
+
+/// A command's dot: blue and pulsing while it runs, green once it is done, amber when it ended
+/// badly, red when it could not run.
+fn exec_node(e: &Exec, working: Option<f32>) -> Node {
+    match &e.state {
+        ExecState::Running => Node { colour: theme::INFO, pulse: Some(working.unwrap_or(0.0)) },
+        ExecState::Done { exit: Some(0) | None, .. } => Node::still(theme::OK),
+        ExecState::Done { .. } => Node::still(theme::WARN),
+        ExecState::Failed(_) => Node::still(theme::ERR),
+        ExecState::Typed => Node::still(theme::TEXT_3),
+    }
 }
 
 /// 주의 / 위험 tag on a command card (read-only commands get none).

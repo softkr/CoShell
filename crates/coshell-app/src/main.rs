@@ -13,6 +13,7 @@ mod conn;
 mod files;
 mod form;
 mod genie;
+mod glass;
 mod glow;
 mod context_menu;
 mod fonts;

@@ -948,6 +948,7 @@ fn body(app: &CoShell) -> El<'_> {
             let mut layers = vec![term];
             // No block view (a full-screen program has the terminal): the chat still opens over it.
             if let Some(chat) = crate::ui_term::chat_overlay(app, tab) {
+                layers.extend(crate::ui_term::scrim(app, tab.id));
                 layers.push(chat);
             }
             if tab.exited {

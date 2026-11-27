@@ -27,3 +27,4 @@ opt-level = 2
 # a winit release carries rust-windowing/winit#4744.
 [patch.crates-io]
 winit = { path = "vendor/winit" }
+iced_wgpu = { path = "vendor/iced_wgpu" }

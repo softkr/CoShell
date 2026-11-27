@@ -490,11 +490,14 @@ fn search_strip<'a>(query: &'a str, shown: usize, total: usize) -> El<'a> {
 const GLOW_W: f32 = 1.5;
 /// Where the edge's light rests while nothing is being answered.
 const GLOW_REST: f32 = 2.2;
-/// Widest the chat sheet gets: about 80 characters of a reply per line.
-const SHEET_W: f32 = 700.0;
-/// The sheet's height is what was said, up to this part of the window, so the
-/// commands the assistant runs stay in view above it.
-const SHEET_MAX_PART: f32 = 0.5;
+/// The conversation's height: this part of the window, whatever was said, so it keeps its
+/// proportions as the window changes and what the assistant runs stays in view above it.
+const SHEET_PART: f32 = 0.5;
+/// What else has to fit in the window's height besides the conversation (title and tab
+/// bars, the dock, the status bar, the orb and the sheet's tools), so in a short window the
+/// conversation gives way instead of pushing its tools out of sight.
+const SHEET_RESERVED_H: f32 = 420.0;
+
 const SHEET_R: f32 = 20.0;
 /// Space kept clear on each side of the sheet.
 const SHEET_MARGIN: f32 = 28.0;
@@ -502,11 +505,6 @@ const SHEET_MARGIN: f32 = 28.0;
 const SIDE_EDGE: f32 = 4.0;
 /// Narrowest the sheet gets in a small window.
 const SHEET_MIN_W: f32 = 260.0;
-
-/// Gentle at both ends.
-fn ease_in_out(t: f32) -> f32 {
-    if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
-}
 
 /// The orb over the sheet, as a face height (`ui::face`): large, so its light can be seen.
 const SHEET_ORB: f32 = 52.0;
@@ -588,28 +586,97 @@ fn ask_row<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
 /// not on screen.
 fn sheet_motion(app: &CoShell, tab: TabId) -> Option<(f32, bool)> {
     if app.ask.as_ref().is_some_and(|(id, _)| *id == tab) {
-        return Some((1.0 - ease_in_out(app.chat_intro()), true));
+        return Some((1.0 - smoother(app.chat_intro()), true));
     }
-    app.chat_outro().filter(|(id, _)| *id == tab).map(|(_, o)| (ease_in_out(o), false))
+    app.chat_outro().filter(|(id, _)| *id == tab).map(|(_, o)| (smoother(o), false))
 }
+
+/// Still at both ends, and with no jolt as it starts or stops (its speed eases in and out too).
+fn smoother(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+}
+
+/// The size the conversation is asked to be: its part of the terminal's width, and its part
+/// of the window's height (less in a short window, so its tools stay in sight).
+pub fn sheet_target(app: &CoShell) -> (f32, f32) {
+    let (left, right) = chat_room(app);
+    let h = app.settings.window.height;
+    (chat_width(app.settings.chat_part, chat_span(left, right)), (h * SHEET_PART).min(h - SHEET_RESERVED_H).max(0.0))
+}
+
+/// How dark the terminal goes behind an open conversation: the AI has the stage.
+const SCRIM: f32 = 0.55;
+
+/// The shade over the terminal while its conversation is open, deepening as the sheet pours
+/// out and lifting as it goes back. It takes no clicks: the terminal is still within reach.
+pub fn scrim<'a>(app: &CoShell, tab: TabId) -> Option<El<'a>> {
+    let (sucked, _) = sheet_motion(app, tab)?;
+    // Lifted while the conversation steps aside for a command, so it can be watched.
+    let a = SCRIM * (1.0 - sucked).clamp(0.0, 1.0) * (1.0 - smoother(app.chat_aside(tab)));
+    Some(container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::Style { background: Some(Background::Color(Color { a, ..Color::BLACK })), ..Default::default() }).into())
+}
+
+/// The terminal's area across the window (left and right edge): what the conversation is
+/// centred in.
+pub fn chat_room(app: &CoShell) -> (f32, f32) {
+    let side = if app.settings.sidebar_open { app.settings.sidebar_width + SIDE_EDGE } else { 0.0 };
+    (crate::ui_sidebar::DOCK_W + side, app.settings.window.width)
+}
+
+/// How wide the conversation can get between the terminal's edges `left` and `right`.
+pub fn chat_span(left: f32, right: f32) -> f32 {
+    (right - left - 2.0 * SHEET_MARGIN).max(SHEET_MIN_W)
+}
+
+/// The conversation's width in a terminal `span` wide: the part dragged to, or three fifths
+/// until then. Always a part, so it keeps its proportion as the window changes.
+pub fn chat_width(part: Option<f32>, span: f32) -> f32 {
+    let w = span * part.unwrap_or(crate::settings::CHAT_PART_DEFAULT);
+    w.clamp(SHEET_MIN_W.min(span), span)
+}
+
+/// About how tall the sheet's tools are, with the rule and edges round them: how far the orb
+/// glides down to rest above the dock when the sheet folds into it.
+const SHEET_TOOLS_H: f32 = 50.0;
+/// How far above the sheet's bottom edge the orb rests when alone, clear of the dock.
+const SHEET_ORB_REST: f32 = 24.0;
+/// Width of the grip along each side of the conversation that widens or narrows it.
+const SHEET_GRIP: f32 = 10.0;
+/// How much of the conversation's ground is solid on frosted glass (the rest is the blurred
+/// terminal showing through), and without it.
+const SHEET_TINT_GLASS: (f32, f32) = (0.62, 0.72);
+const SHEET_TINT_SOLID: (f32, f32) = (0.9, 0.94);
 
 /// The conversation, on a sheet of dark glass over the terminal. Like a window from the
 /// Dock it pours out of the AI's face in the dock as it opens and is drawn back into it as
 /// it closes (`sucked`: how far in it is).
 fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab, sucked: f32, live: bool) -> El<'a> {
-    let max_height = app.settings.window.height * SHEET_MAX_PART;
-    let talk = crate::ui_ai::sheet_conversation(tab, app.prod_guard, app.fold, max_height);
+    // While a command the assistant typed runs, the conversation folds into the orb.
+    let aside = smoother(app.chat_aside(tab.id));
+    let live = live && aside <= 0.0;
+    // In proportion to the window, gliding to a new size rather than jumping to it.
+    let (full_w, height) = app.sheet_size();
+    let talk = crate::ui_ai::sheet_conversation(tab, app.prod_guard, app.fold, height);
+    // A conversation sits at the bottom of its room, a greeting in the middle of it.
+    let at = if tab.chat.turns.is_empty() { iced::alignment::Vertical::Center } else { iced::alignment::Vertical::Bottom };
+    let talk = container(talk).width(Length::Fill).height(height).align_y(at).clip(true);
+    // Once it has poured out, its glass comes up: the solid ground it moved on gives way.
+    let glass = if sucked <= 0.0 { app.chat_glass() } else { 0.0 };
+    let g = if crate::glass::working() { glass } else { 0.0 };
+    let tint = (SHEET_TINT_SOLID.0 + (SHEET_TINT_GLASS.0 - SHEET_TINT_SOLID.0) * g, SHEET_TINT_SOLID.1 + (SHEET_TINT_GLASS.1 - SHEET_TINT_SOLID.1) * g);
     // What has scrolled up fades into the sheet instead of being cut at its edge.
-    let fade = container(Space::new()).width(Length::Fill).height(SHEET_FADE).style(|_| {
-        let into_sheet = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, theme::BG_3).add_stop(1.0, alpha(theme::BG_3, 0.0));
+    let fade = container(Space::new()).width(Length::Fill).height(SHEET_FADE).style(move |_| {
+        let into_sheet = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, alpha(theme::BG_3, tint.0 + 0.08)).add_stop(1.0, alpha(theme::BG_3, 0.0));
         container::Style { background: Some(Background::Gradient(into_sheet.into())), ..Default::default() }
     });
     // Room at the top for the lower half of the orb that floats over the sheet's edge.
     let talk = column![Space::new().height(SHEET_ORB_D / 2.0 + 4.0), iced::widget::stack![talk, fade], crate::ui::rule(true), crate::ui_ai::sheet_tools(app, tab)];
-    let side = if app.settings.sidebar_open { app.settings.sidebar_width + SIDE_EDGE } else { 0.0 };
-    let full_w = (app.settings.window.width - crate::ui_sidebar::DOCK_W - side - 2.0 * SHEET_MARGIN).clamp(SHEET_MIN_W, SHEET_W);
-    let sheet = container(container(talk).width(full_w)).clip(true).style(|_| {
-        let glass = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, alpha(theme::BG_3, 0.9)).add_stop(1.0, alpha(theme::BG_1, 0.94));
+    // A grip down each side: dragged, the conversation widens or narrows on both sides.
+    let grip = || mouse_area(container(Space::new()).width(SHEET_GRIP).height(Length::Fill)).on_press(Message::ChatResizeStart).interaction(iced::mouse::Interaction::ResizingHorizontally);
+    let talk = iced::widget::stack![container(talk).width(full_w), row![grip(), Space::new().width(Length::Fill), grip()]];
+    let sheet = container(talk).clip(true).style(move |_| {
+        let glass = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, alpha(theme::BG_3, tint.0)).add_stop(1.0, alpha(theme::BG_1, tint.1));
         container::Style {
             background: Some(Background::Gradient(glass.into())),
             border: Border { color: theme::LINE_2, width: 1.0, radius: SHEET_R.into() },
@@ -618,11 +685,23 @@ fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab, sucked: f32, live: bool) -> El
             ..Default::default()
         }
     });
+    // Frosted: the terminal shows through it, blurred, as through macOS's glass.
+    let sheet = crate::glass::glass(sheet, SHEET_R, glass);
     // Clicks on the sheet stay on it; around it the terminal is still within reach.
-    let sheet: El<'a> = if live { iced::widget::opaque(sheet) } else { sheet.into() };
+    let sheet: El<'a> = if live { iced::widget::opaque(sheet) } else { sheet };
+    // Stepping aside, the sheet shrinks up into the orb (drawn so: nothing is laid out again,
+    // so nothing jumps), and the orb glides down to rest above the dock, alone, while the
+    // command runs.
+    let sheet: El<'a> = if aside > 0.0 {
+        let tall = SHEET_ORB_D / 2.0 + 4.0 + height + SHEET_TOOLS_H;
+        crate::motion::Shift::new(sheet, 1.0 - 0.94 * aside, iced::Vector::new(0.0, -tall / 2.0 * aside), aside < 0.999).into()
+    } else {
+        sheet
+    };
     // The AI itself floats over the sheet's top edge, half above it.
     let orb = container(crate::ui::face(SHEET_ORB, app.face)).center_x(Length::Fill);
-    let sheet = iced::widget::stack![column![Space::new().height(SHEET_ORB_D / 2.0), sheet], orb];
+    let sheet: El<'a> = iced::widget::stack![column![Space::new().height(SHEET_ORB_D / 2.0), sheet], orb].into();
+    let sheet: El<'a> = if aside > 0.0 { crate::motion::Shift::new(sheet, 1.0, iced::Vector::new(0.0, (height + SHEET_TOOLS_H - SHEET_ORB_REST) * aside), true).into() } else { sheet };
     crate::genie::Genie::new(sheet, sucked, FACE_SPOT, Padding { top: 24.0, right: SHEET_MARGIN, bottom: 4.0, left: SHEET_MARGIN }, live).into()
 }
 
@@ -709,7 +788,7 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
     // A click anywhere gives the keyboard back to the shell.
     let body: El<'a> = mouse_area(body).on_press(Message::FocusTerminal).into();
     let body = match sheet_motion(app, tab.id) {
-        Some((sucked, live)) => iced::widget::stack![body, chat_sheet(app, tab, sucked, live)].into(),
+        Some((sucked, live)) => iced::widget::stack![body, scrim(app, tab.id).expect("the sheet is showing"), chat_sheet(app, tab, sucked, live)].into(),
         None => body,
     };
     let mut layers = column![];
@@ -774,9 +853,12 @@ mod system_tests {
         assert!(settle(0.5) < 0.5, "most of the movement comes early");
         assert!(settle(0.2) > settle(0.6));
         assert_eq!(settle(7.0), 0.0, "never past the end");
-        assert_eq!((ease_in_out(0.0), ease_in_out(1.0)), (0.0, 1.0));
-        assert!(ease_in_out(0.3) < ease_in_out(0.6), "always forward");
-        assert!((ease_in_out(0.3) - (1.0 - ease_in_out(0.7))).abs() < 1e-6, "symmetric: an exit turned back half way meets its entrance");
+        assert_eq!((smoother(0.0), smoother(1.0), smoother(-1.0), smoother(2.0)), (0.0, 1.0, 0.0, 1.0));
+        assert!(smoother(0.3) < smoother(0.6), "always forward");
+        assert!((smoother(0.3) - (1.0 - smoother(0.7))).abs() < 1e-6, "symmetric: an exit turned back half way meets its entrance");
+        // Its speed starts and ends at nothing, and so does its change of speed.
+        let speed = |t: f32| (smoother(t + 1e-3) - smoother(t)) / 1e-3;
+        assert!(speed(0.0) < 1e-3 && speed(0.999) < 1e-2 && speed(0.5) > 1.8);
     }
 
     #[test]

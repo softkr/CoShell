@@ -1975,6 +1975,8 @@ fn readme_screenshots() {
     let Ok(dir) = std::env::var("COSHELL_README_DIR") else { return };
     let dir = Path::new(&dir).to_path_buf();
     let shot = |app: &CoShell, name: &str| {
+        // Twice: the first frame finds out whether frosted glass can be drawn here.
+        let _ = simulator(ui::view(app)).snapshot(&iced::Theme::Dark);
         let mut ui = simulator(ui::view(app));
         let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(dir.join(name));
     };
@@ -2181,7 +2183,8 @@ fn run_button_waits_for_the_reply_and_turns_into_progress_once_pressed() {
     let e = &chat_of(&app, id).turns[1].execs[0];
     assert_eq!((e.cmd.as_str(), &e.state, e.manual), (cmd, &ExecState::Running, true));
     assert!(!has_run_button(&app), "no second ▶ while it runs");
-    simulator(ui::view(&app)).find("실행 중…").expect("progress shown");
+    // It is watched in the terminal: the conversation has stepped aside, only the AI left.
+    assert_eq!(app.chat_aside(id), 1.0);
     let _ = app.update(Message::AiRun(id, 1, cmd.into()));
     assert_eq!(chat_of(&app, id).turns[1].execs.len(), 1, "a second press while running does nothing");
 
@@ -3064,4 +3067,81 @@ fn connecting_closing_and_failing_screens_say_where_and_what() {
     for t in ["라즈베리파이에 연결하지 못했습니다", "오류 내용", "Permission denied (publickey)", "다시 시도"] {
         ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
     }
+}
+
+#[test]
+fn the_conversation_steps_aside_while_the_assistant_runs_a_command_and_widens_by_its_sides() {
+    let mut app = app();
+    let id = app.open_local();
+    past_startup(&mut app, id);
+    let _ = app.update(Message::WindowResized(iced::Size::new(1400.0, 900.0)));
+    let _ = app.update(Message::AiToggle);
+    {
+        let chat = &mut app.tabs.iter_mut().find(|t| t.id == id).unwrap().chat;
+        chat.turns.push(turn(Role::User, "디스크 확인해 줘"));
+        chat.turns.push(turn(Role::Assistant, "용량부터 볼게요."));
+    }
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.chat_aside(id), 0.0, "in place while nothing runs");
+    simulator(ui::view(&app)).find("디스크 확인해 줘").expect("the conversation shows");
+    // The assistant typed a command into the terminal: the conversation gets out of the way.
+    {
+        let chat = &mut app.tabs.iter_mut().find(|t| t.id == id).unwrap().chat;
+        chat.turns.last_mut().unwrap().execs.push(Exec { cmd: "df -h".into(), state: ExecState::Running, sent: false, open: false, manual: false });
+    }
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.chat_aside(id), 1.0, "aside while it runs");
+    // Folded into the orb, which rests above the dock: drawn so, its place in the layout kept
+    // (so nothing jumps), and it takes no clicks while it is away.
+    let ui = simulator(ui::view(&app));
+    // Only the AI is left, above the dock (a checkbox reports itself visible through a clip,
+    // so this is looked at, not asserted: COSHELL_SNAPSHOT_DIR, "chat-aside").
+    if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+        let _ = simulator(ui::view(&app)).snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("chat-aside"));
+    }
+    drop(ui);
+    // Done: back again.
+    {
+        let chat = &mut app.tabs.iter_mut().find(|t| t.id == id).unwrap().chat;
+        chat.turns.last_mut().unwrap().execs[0].state = ExecState::Done { output: "ok".into(), exit: Some(0), secrets: 0 };
+    }
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.chat_aside(id), 0.0, "coming back");
+
+    // Three fifths of the terminal, however large the window.
+    use crate::ui_term::{chat_span, chat_width};
+    assert_eq!(app.settings.chat_part, None);
+    assert_eq!(chat_width(None, 1000.0), 600.0);
+    assert_eq!(chat_width(None, 2400.0), 1440.0);
+    assert_eq!(chat_width(None, 300.0), 260.0, "a small window: never narrower than the sheet's least");
+    // A side dragged out: the conversation is twice the distance from the middle, kept as a
+    // part of the terminal, never narrower than its least nor wider than the terminal.
+    let (left, right) = crate::ui_term::chat_room(&app);
+    let (middle, span) = ((left + right) / 2.0, chat_span(left, right));
+    let width = |app: &CoShell| chat_width(app.settings.chat_part, span);
+    let _ = app.update(Message::ChatResizeStart);
+    let _ = app.update(Message::AiResizeTo(middle + 300.0));
+    assert!((width(&app) - 600.0).abs() < 0.01, "{}", width(&app));
+    let _ = app.update(Message::AiResizeTo(middle - 350.0));
+    assert!((width(&app) - 700.0).abs() < 0.01, "either side");
+    assert!(chat_width(app.settings.chat_part, span * 2.0) > 1300.0, "a part: it grows with the window");
+    let _ = app.update(Message::AiResizeTo(middle + 10.0));
+    assert!((width(&app) - crate::settings::CHAT_W_MIN).abs() < 0.01);
+    let _ = app.update(Message::AiResizeTo(right + 500.0));
+    assert_eq!(width(&app), span);
+    let _ = app.update(Message::AiResizeEnd);
+    let _ = app.update(Message::AiResizeTo(middle + 300.0));
+    assert_eq!(width(&app), span, "let go: no longer follows the pointer");
+}
+
+#[test]
+fn the_orb_waits_and_speaks() {
+    // To look at (COSHELL_SNAPSHOT_DIR): waiting (top) and speaking (bottom), at a few moments.
+    use crate::glow::{Kind, Light, light};
+    let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") else { return };
+    let orb = |at: f32, voice: f32| -> iced::Element<'static, Message> { light(Light { kind: Kind::Orb, at, voice, surge: 0.0 }, iced::Length::Fixed(220.0), iced::Length::Fixed(220.0), iced::widget::Space::new()) };
+    let line = |voice: f32| iced::widget::row![orb(3.0, voice), orb(9.5, voice), orb(4.2, voice), orb(7.7, voice)].spacing(20);
+    let all = iced::widget::column![line(0.0), line(1.0)].spacing(20).padding(20);
+    let mut ui = simulator(iced::widget::container(all).style(crate::ui::fill(crate::theme::BG_0)));
+    let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("orb-looks"));
 }

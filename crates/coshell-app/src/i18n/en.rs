@@ -68,6 +68,7 @@ pub fn en(s: &str) -> Option<&'static str> {
         "터미널 화면 지우기 (clear)" => "Clear the terminal screen (clear)",
         "터미널" => "Terminal",
         "무엇이든 물어보세요" => "Ask anything",
+        "{0}줄 더" => "{0} more lines",
         "현재 서버 AI 자동 진단" => "AI health check of this server",
         "호스트" => "Host",
         "호스트명, IP 검색…" => "Search name or IP…",

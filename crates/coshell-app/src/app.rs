@@ -81,8 +81,18 @@ const SCROLLBAR_FADE_TICK: Duration = Duration::from_millis(16);
 /// is coming), and where its phase wraps (a common multiple of the ribbons' cycles).
 const WAVE_TICK: Duration = Duration::from_millis(33);
 /// How long the conversation takes to pour out of the dock, and to be drawn back into it.
-const CHAT_INTRO: Duration = Duration::from_millis(550);
-const CHAT_OUTRO: Duration = Duration::from_millis(450);
+const CHAT_INTRO: Duration = Duration::from_millis(650);
+const CHAT_OUTRO: Duration = Duration::from_millis(520);
+/// Once the conversation has poured out, its glass comes up over this long.
+const GLASS_IN: Duration = Duration::from_millis(320);
+/// How quickly the conversation follows a new size (window, side panel, its sides dragged):
+/// the time constant of its glide (s).
+const SHEET_EASE: f32 = 0.09;
+/// The conversation steps aside while the assistant runs a command (so it can be watched in
+/// the terminal), stays aside at least `ASIDE_HOLD` once it has, and comes back.
+const ASIDE_IN: Duration = Duration::from_millis(380);
+const ASIDE_HOLD: Duration = Duration::from_millis(700);
+const ASIDE_OUT: Duration = Duration::from_millis(480);
 const WAVE_STEP: f32 = 0.035;
 const WAVE_STEP_BUSY: f32 = 0.12;
 const WAVE_PERIOD: f32 = std::f32::consts::TAU * 100.0;
@@ -536,6 +546,12 @@ pub struct CoShell {
     chat_opened: Option<(TabId, std::time::Instant)>,
     /// The tab whose conversation last closed, and since when (its exit plays from then).
     chat_closed: Option<(TabId, std::time::Instant)>,
+    /// The conversation stepping aside for a command the assistant runs (true) or coming back
+    /// (false), for which tab, and since when.
+    aside: Option<(TabId, bool, std::time::Instant)>,
+    /// The conversation's width and height as drawn, gliding toward what the window and its
+    /// sides ask for, and when they last moved.
+    sheet_dims: Option<(f32, f32, std::time::Instant)>,
     /// A moment of the conversation's entrance to show (tests).
     #[cfg(test)]
     pub intro_at: Option<f32>,
@@ -558,6 +574,8 @@ pub struct SnippetFlight {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Divider {
     Sidebar,
+    /// A side of the AI conversation (it widens on both sides at once).
+    Chat,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -654,6 +672,8 @@ pub enum Message {
     TabRenameCancel,
     NoticeDismiss,
     SidebarResizeStart,
+    /// A side of the AI conversation is held.
+    ChatResizeStart,
     /// Cursor x while dragging a divider.
     AiResizeTo(f32),
     AiResizeEnd,
@@ -1041,6 +1061,8 @@ impl CoShell {
             light_at: None,
             chat_opened: None,
             chat_closed: None,
+            aside: None,
+            sheet_dims: None,
             #[cfg(test)]
             intro_at: None,
             #[cfg(test)]
@@ -1605,6 +1627,44 @@ impl CoShell {
         self.chat_opened.map_or(1.0, |(_, at)| played(at, CHAT_INTRO))
     }
 
+    /// How far `tab`'s conversation has stepped aside for a command the assistant is running:
+    /// 0 in place, 1 out of the way.
+    pub fn chat_aside(&self, tab: TabId) -> f32 {
+        // Tests see it where it is going.
+        #[cfg(test)]
+        return match self.aside {
+            Some((id, going, _)) if id == tab && going => 1.0,
+            _ => 0.0,
+        };
+        #[cfg(not(test))]
+        match self.aside {
+            Some((id, true, at)) if id == tab => played(at, ASIDE_IN),
+            Some((id, false, at)) if id == tab => 1.0 - played(at, ASIDE_OUT),
+            _ => 0.0,
+        }
+    }
+
+    /// The conversation's width and height as drawn now.
+    pub fn sheet_size(&self) -> (f32, f32) {
+        #[cfg(test)]
+        return crate::ui_term::sheet_target(self);
+        #[cfg(not(test))]
+        self.sheet_dims.map_or_else(|| crate::ui_term::sheet_target(self), |(w, h, _)| (w, h))
+    }
+
+    /// How far the open conversation's glass has come up (0 → 1), once it has poured out.
+    pub fn chat_glass(&self) -> f32 {
+        #[cfg(test)]
+        return 1.0;
+        #[cfg(not(test))]
+        self.chat_opened.map_or(1.0, |(_, at)| played(at + CHAT_INTRO, GLASS_IN))
+    }
+
+    /// The conversation is moving aside or back.
+    fn aside_moving(&self) -> bool {
+        self.aside.is_some_and(|(_, going, at)| at.elapsed() < if going { ASIDE_IN } else { ASIDE_OUT } || at > std::time::Instant::now())
+    }
+
     /// The tab whose conversation is on its way out, and how far its exit has played (0 → 1).
     /// None once it is over.
     pub fn chat_outro(&self) -> Option<(TabId, f32)> {
@@ -2050,6 +2110,40 @@ impl CoShell {
                 _ => (id, now),
             });
         }
+        // The conversation glides to the size the window and its sides ask for; closed, it
+        // simply takes it, so it opens at the right size.
+        let target = crate::ui_term::sheet_target(self);
+        let now = std::time::Instant::now();
+        let showing = self.ask.is_some() || self.chat_outro().is_some();
+        self.sheet_dims = Some(match self.sheet_dims {
+            Some((w, h, at)) if showing => {
+                let k = 1.0 - (-(now - at).as_secs_f32().min(0.1) / SHEET_EASE).exp();
+                (w + (target.0 - w) * k, h + (target.1 - h) * k, now)
+            }
+            _ => (target.0, target.1, now),
+        });
+        // A command the assistant typed is running in the open conversation's terminal: the
+        // conversation steps aside so it can be watched, and comes back when it is done.
+        let running = self.ask.as_ref().map(|(id, _)| *id).filter(|id| {
+            self.tabs.iter().any(|t| t.id == *id && t.chat.turns.iter().any(|turn| turn.execs.iter().any(|e| e.state == crate::ai::ExecState::Running)))
+        });
+        let aside_for = self.aside.and_then(|(id, going, _)| going.then_some(id));
+        if running != aside_for {
+            let now = std::time::Instant::now();
+            match (running, self.aside) {
+                // Going aside, from wherever it had got to on its way back.
+                (Some(id), _) => {
+                    let had = self.chat_aside(id);
+                    self.aside = Some((id, true, now - ASIDE_IN.mul_f32(had.clamp(0.0, 1.0))));
+                }
+                // Done: back once it has been aside a moment, so a quick command does not flicker.
+                (None, Some((id, true, at))) => {
+                    let back = (at + ASIDE_IN + ASIDE_HOLD).max(now);
+                    self.aside = Some((id, false, back));
+                }
+                (None, _) => {}
+            }
+        }
         // The orb holds the conversation's wave: it rolls while the conversation is open, and
         // speaks while a reply comes.
         self.face.turn = (self.wave * 100.0) as u16;
@@ -2255,6 +2349,10 @@ impl CoShell {
                 self.resizing = Some(Divider::Sidebar);
                 Task::none()
             }
+            Message::ChatResizeStart => {
+                self.resizing = Some(Divider::Chat);
+                Task::none()
+            }
             Message::AiResizeTo(x) => {
                 let w = self.settings.window.width;
                 match self.resizing {
@@ -2264,6 +2362,15 @@ impl CoShell {
                         let room = (w - dock - TERMINAL_MIN_W).max(settings::SIDEBAR_W_MIN);
                         let max = settings::SIDEBAR_W_MAX.min(room);
                         self.settings.sidebar_width = (x - dock).clamp(settings::SIDEBAR_W_MIN, max);
+                    }
+                    Some(Divider::Chat) => {
+                        // Centred over the terminal: the side held is as far from the middle as
+                        // the other one.
+                        let (left, right) = crate::ui_term::chat_room(self);
+                        let middle = (left + right) / 2.0;
+                        let room = crate::ui_term::chat_span(left, right);
+                        let least = (settings::CHAT_W_MIN / room).max(settings::CHAT_PART_MIN);
+                        self.settings.chat_part = Some((2.0 * (x - middle).abs() / room).clamp(least.min(settings::CHAT_PART_MAX), settings::CHAT_PART_MAX));
                     }
                     None => return Task::none(),
                 }
@@ -3867,7 +3974,7 @@ impl CoShell {
         // Connecting: the route's light runs. Just ended: the banner slides in.
         let connecting = self.active_tab().is_some_and(|t| matches!(t.phase, Phase::Connecting));
         let ending = self.active_tab().and_then(|t| t.exited_at).is_some_and(|at| at.elapsed() < crate::ui::BANNER_IN);
-        let motion = if self.snippets_intro().is_some() || self.flight_progress().is_some() || files_moving || servers_moving || gliding || connecting || ending {
+        let motion = if self.aside_moving() || self.snippets_intro().is_some() || self.flight_progress().is_some() || files_moving || servers_moving || gliding || connecting || ending {
             iced::window::frames().map(|_| Message::Tick)
         } else if self.snippet_hover.is_some() || (servers && self.host_hover.is_some()) || pulsing {
             iced::time::every(SNIPPET_GLOW_TICK).map(|_| Message::Tick)

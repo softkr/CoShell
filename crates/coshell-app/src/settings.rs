@@ -24,6 +24,13 @@ pub const ATTACH_LINES_STEP: usize = 10;
 pub const SIDEBAR_W_DEFAULT: f32 = 256.0;
 pub const SIDEBAR_W_MIN: f32 = 210.0;
 pub const SIDEBAR_W_MAX: f32 = 380.0;
+/// The AI conversation's width, as a part of the terminal's: three fifths at first, then the
+/// part its sides are dragged to, whatever the window's size.
+pub const CHAT_PART_DEFAULT: f32 = 0.6;
+/// Narrowest the conversation is dragged to (px), and the parts it is kept between.
+pub const CHAT_W_MIN: f32 = 420.0;
+pub const CHAT_PART_MIN: f32 = 0.2;
+pub const CHAT_PART_MAX: f32 = 1.0;
 const FONT_FAMILY_MAX_CHARS: usize = 64;
 pub const SNIPPETS_MAX: usize = 200;
 const SNIPPET_TITLE_MAX_CHARS: usize = 60;
@@ -160,6 +167,9 @@ pub struct Settings {
     /// Remembered state: the server sidebar on the left.
     pub sidebar_open: bool,
     pub sidebar_width: f32,
+    /// The part of the terminal's width the AI conversation takes, once its sides have been
+    /// dragged; `None`: three fifths.
+    pub chat_part: Option<f32>,
     /// Remembered state: the status bar at the bottom.
     pub statusbar_open: bool,
     /// Show commands and their output as blocks (the raw terminal for full-screen programs).
@@ -185,6 +195,7 @@ impl Default for Settings {
             sidebar_open: true,
             statusbar_open: true,
             sidebar_width: SIDEBAR_W_DEFAULT,
+            chat_part: None,
             block_view: true,
             window: WindowSize::default(),
             snippets: None,
@@ -211,6 +222,7 @@ impl Settings {
         self.scrollback = self.scrollback.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX);
         self.ai_attach_lines = self.ai_attach_lines.clamp(ATTACH_LINES_MIN, ATTACH_LINES_MAX);
         self.sidebar_width = clamp_or(self.sidebar_width, SIDEBAR_W_MIN, SIDEBAR_W_MAX, SIDEBAR_W_DEFAULT);
+        self.chat_part = self.chat_part.filter(|p| p.is_finite()).map(|p| p.clamp(CHAT_PART_MIN, CHAT_PART_MAX));
         self.window.width = clamp_or(self.window.width, WINDOW_MIN.0, WINDOW_MAX.0, WINDOW_DEFAULT.0);
         self.window.height = clamp_or(self.window.height, WINDOW_MIN.1, WINDOW_MAX.1, WINDOW_DEFAULT.1);
         self.snippets = self.snippets.map(|v| v.iter().filter_map(Snippet::sanitize).take(SNIPPETS_MAX).collect());
