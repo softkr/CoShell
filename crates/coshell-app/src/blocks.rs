@@ -7,7 +7,7 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use coshell_term::SharedTerm;
+use coshell_term::{SharedTerm, StyledLine};
 use coshell_term::alacritty_terminal::term::TermMode;
 use regex::Regex;
 
@@ -40,13 +40,13 @@ pub enum Sig {
 pub struct Block {
     pub prompt: Prompt,
     pub cmd: String,
-    pub output: Vec<String>,
+    pub output: Vec<StyledLine>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Screen {
     /// Text above the first prompt (login banner, MOTD).
-    pub preamble: Vec<String>,
+    pub preamble: Vec<StyledLine>,
     pub blocks: Vec<Block>,
     /// The prompt waiting for input and what is typed on it; `None` while a command runs.
     pub current: Option<(Prompt, String)>,
@@ -85,10 +85,10 @@ fn prompt_line(line: &str, sig: &Sig) -> Option<(Prompt, String)> {
 }
 
 /// Split terminal lines into blocks at prompt lines.
-pub fn parse(lines: &[String], sig: &Sig) -> Screen {
+pub fn parse(lines: &[StyledLine], sig: &Sig) -> Screen {
     let mut screen = Screen::default();
     for line in lines {
-        match prompt_line(line, sig) {
+        match prompt_line(&line.text, sig) {
             Some((prompt, cmd)) => screen.blocks.push(Block { prompt, cmd, output: Vec::new() }),
             None => match screen.blocks.last_mut() {
                 Some(b) => b.output.push(line.clone()),
@@ -101,7 +101,7 @@ pub fn parse(lines: &[String], sig: &Sig) -> Screen {
         screen.current = Some((b.prompt, b.cmd));
     }
     // Enter on an empty line leaves a bare prompt behind.
-    screen.blocks.retain(|b| !(b.cmd.is_empty() && b.output.iter().all(|l| l.trim().is_empty())));
+    screen.blocks.retain(|b| !(b.cmd.is_empty() && b.output.iter().all(|l| l.text.trim().is_empty())));
     screen
 }
 
@@ -311,8 +311,8 @@ pub fn highlight(text: &str, query: &str) -> Vec<(String, Mark)> {
 mod tests {
     use super::*;
 
-    fn lines(s: &str) -> Vec<String> {
-        s.lines().map(str::to_string).collect()
+    fn lines(s: &str) -> Vec<StyledLine> {
+        s.lines().map(StyledLine::from).collect()
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
             &lines("Welcome to Ubuntu\nops@app-01:~$ df -h /var\nFilesystem Size\n/dev/sda2 80G 91% /var\nops@app-01:~$\nops@app-01:~$ du -h\n56G /var/log\nops@app-01:~$ ls -l"),
             &sig,
         );
-        assert_eq!(s.preamble, vec!["Welcome to Ubuntu"]);
+        assert_eq!(s.preamble, lines("Welcome to Ubuntu"));
         assert_eq!(s.blocks.len(), 2, "empty Enter dropped");
         assert_eq!(s.blocks[0].cmd, "df -h /var");
         assert_eq!(s.blocks[0].output.len(), 2);
@@ -346,7 +346,7 @@ mod tests {
         // Output after the last prompt: still running.
         let s = parse(&lines("ops@app-01:~$ sleep 5\n[sudo] password for ops:"), &sig);
         assert!(s.running());
-        assert_eq!(s.blocks[0].output, vec!["[sudo] password for ops:"]);
+        assert_eq!(s.blocks[0].output, lines("[sudo] password for ops:"));
     }
 
     #[test]
@@ -354,7 +354,7 @@ mod tests {
         let sig = Sig::UserHost("me@laptop".into());
         let s = parse(&lines("me@laptop ~ % cat notes\nroot@other:~# not mine\nme@laptop ~ %"), &sig);
         assert_eq!(s.blocks.len(), 1);
-        assert_eq!(s.blocks[0].output, vec!["root@other:~# not mine"]);
+        assert_eq!(s.blocks[0].output, lines("root@other:~# not mine"));
     }
 
     #[test]

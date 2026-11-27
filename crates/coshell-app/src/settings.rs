@@ -14,12 +14,13 @@ pub const FONT_SIZE_MAX: f32 = 28.0;
 pub const SCROLLBACK_DEFAULT: usize = 10_000;
 pub const SCROLLBACK_MIN: usize = 100;
 pub const SCROLLBACK_MAX: usize = 100_000;
+/// One press of the scrollback's −/+.
+pub const SCROLLBACK_STEP: usize = 1000;
 pub const ATTACH_LINES_DEFAULT: usize = 60;
 pub const ATTACH_LINES_MIN: usize = 10;
 pub const ATTACH_LINES_MAX: usize = 500;
-pub const AI_PANEL_W_DEFAULT: f32 = 380.0;
-pub const AI_PANEL_W_MIN: f32 = 280.0;
-pub const AI_PANEL_W_MAX: f32 = 720.0;
+/// One press of the attached lines' −/+.
+pub const ATTACH_LINES_STEP: usize = 10;
 pub const SIDEBAR_W_DEFAULT: f32 = 256.0;
 pub const SIDEBAR_W_MIN: f32 = 210.0;
 pub const SIDEBAR_W_MAX: f32 = 380.0;
@@ -152,14 +153,10 @@ pub struct Settings {
     pub option_as_meta: bool,
     /// Terminal lines attached to an AI question.
     pub ai_attach_lines: usize,
-    /// Remembered state, not a preference.
-    pub ai_panel_open: bool,
     /// Remembered toggle: the assistant runs read-only commands itself and reads the results.
     pub ai_agent: bool,
     /// Look for a new release on start and every 10 minutes.
     pub update_check: bool,
-    /// Remembered state: dragged with the divider.
-    pub ai_panel_width: f32,
     /// Remembered state: the server sidebar on the left.
     pub sidebar_open: bool,
     pub sidebar_width: f32,
@@ -183,10 +180,8 @@ impl Default for Settings {
             scrollback: SCROLLBACK_DEFAULT,
             option_as_meta: true,
             ai_attach_lines: ATTACH_LINES_DEFAULT,
-            ai_panel_open: false,
             ai_agent: true,
             update_check: true,
-            ai_panel_width: AI_PANEL_W_DEFAULT,
             sidebar_open: true,
             statusbar_open: true,
             sidebar_width: SIDEBAR_W_DEFAULT,
@@ -215,7 +210,6 @@ impl Settings {
         self.font_family = self.font_family.trim().chars().filter(|c| !c.is_control()).take(FONT_FAMILY_MAX_CHARS).collect();
         self.scrollback = self.scrollback.clamp(SCROLLBACK_MIN, SCROLLBACK_MAX);
         self.ai_attach_lines = self.ai_attach_lines.clamp(ATTACH_LINES_MIN, ATTACH_LINES_MAX);
-        self.ai_panel_width = clamp_or(self.ai_panel_width, AI_PANEL_W_MIN, AI_PANEL_W_MAX, AI_PANEL_W_DEFAULT);
         self.sidebar_width = clamp_or(self.sidebar_width, SIDEBAR_W_MIN, SIDEBAR_W_MAX, SIDEBAR_W_DEFAULT);
         self.window.width = clamp_or(self.window.width, WINDOW_MIN.0, WINDOW_MAX.0, WINDOW_DEFAULT.0);
         self.window.height = clamp_or(self.window.height, WINDOW_MIN.1, WINDOW_MAX.1, WINDOW_DEFAULT.1);

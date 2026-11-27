@@ -17,6 +17,10 @@ const EDITOR_BODY_H: f32 = 540.0;
 const PREVIEW_H: f32 = 300.0;
 /// Width of the + / − buttons beside each hop, so the arrows line up under the pickers.
 const HOP_BTNS_W: f32 = 64.0;
+/// The form's label column.
+const LABEL_W: f32 = 84.0;
+const PORT_W: f32 = 100.0;
+const ENV_W: f32 = 180.0;
 
 /// A server offered as a jump hop: shown by its name, stored by its alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,38 +57,25 @@ pub fn env_tag<'a>(env: Env) -> El<'a> {
         .into()
 }
 
-fn env_segment(current: Env) -> El<'static> {
-    let buttons = Env::ALL.map(|e| {
-        let on = e == current;
-        let c = env_color(e).unwrap_or(theme::TEXT_2);
-        button(text(e.label()).size(12).color(if on { c } else { theme::TEXT_2 }))
-            .padding([5, 12])
-            .on_press(Message::HostEnv(e))
-            .style(move |_, _| iced::widget::button::Style {
-                background: Some(Background::Color(if on { theme::BG_3 } else { Color::TRANSPARENT })),
-                text_color: theme::TEXT,
-                border: Border { color: if on { alpha(c, 0.6) } else { theme::LINE_2 }, width: 1.0, radius: crate::ui::R_CONTROL.into() },
-                ..Default::default()
-            })
-            .into()
-    });
-    row(buttons).spacing(6).into()
+/// A text field of the server, without its label.
+fn input<'a>(placeholder: &'a str, value: &'a str, f: HostField) -> iced::widget::TextInput<'a, Message> {
+    text_input(placeholder, value)
+        .on_input(move |v| Message::HostField(f, v))
+        .on_submit(Message::HostSave(false))
+        .font(crate::fonts::MONO)
+        .size(12)
+        .padding([6, 10])
+        .style(input_style)
 }
 
+/// A labelled text field: one row of the form.
 fn field<'a>(label: &'a str, placeholder: &'a str, value: &'a str, f: HostField) -> El<'a> {
-    column![
-        text(label).size(11.5).color(theme::TEXT_2),
-        text_input(placeholder, value)
-            .on_input(move |v| Message::HostField(f, v))
-            .on_submit(Message::HostSave(false))
-            .font(crate::fonts::MONO)
-            .size(12)
-            .padding([6, 10])
-            .style(input_style),
-    ]
-    .spacing(4)
-    .width(Length::Fill)
-    .into()
+    crate::form::field(LABEL_W, label, input(placeholder, value, f))
+}
+
+/// An explanation under a field.
+fn note<'a>(s: impl Into<String>) -> El<'a> {
+    crate::form::under(LABEL_W, muted(s))
 }
 
 /// Saved in the OS keychain only; the value is never shown again.
@@ -103,12 +94,12 @@ fn password_field(ed: &HostEditor) -> El<'_> {
     if saved {
         line = line.push(btn(tr("저장된 비밀번호 삭제"), Btn::Ghost, Some(Message::HostForgetPassword)));
     }
-    let note = if ed.forget_password && ed.saved_password.is_some() {
+    let about = if ed.forget_password && ed.saved_password.is_some() {
         tr("저장하면 키체인에서 비밀번호를 지웁니다.")
     } else {
         tr("키체인에만 저장되고 설정 파일에는 남지 않습니다.")
     };
-    column![text(tr("비밀번호")).size(11.5).color(theme::TEXT_2), line, muted(note)].spacing(4).into()
+    column![crate::form::field(LABEL_W, tr("비밀번호"), line), note(about)].spacing(4).into()
 }
 
 fn hop_btn<'a>(icon: &std::sync::LazyLock<iced::widget::svg::Handle>, msg: Option<Message>) -> El<'a> {
@@ -208,11 +199,8 @@ fn tab_bar(ed: &HostEditor) -> El<'_> {
 fn basic_fields<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
     let d = &ed.def;
     let mut col = column![
-        row![
-            field(tr("이름"), tr("예: 웹 서버"), d.name.as_deref().unwrap_or(""), HostField::Name),
-            field(tr("그룹"), tr("예: 회사"), d.group.as_deref().unwrap_or(""), HostField::Group),
-        ]
-        .spacing(10)
+        field(tr("이름"), tr("예: 웹 서버"), d.name.as_deref().unwrap_or(""), HostField::Name),
+        field(tr("그룹"), tr("예: 회사"), d.group.as_deref().unwrap_or(""), HostField::Group),
     ]
     .spacing(10);
     let groups = app.groups();
@@ -230,12 +218,12 @@ fn basic_fields<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
                 })
                 .into()
         });
-        col = col.push(row![muted(tr("기존 그룹"))].extend(chips).spacing(6).align_y(Alignment::Center).wrap());
+        col = col.push(crate::form::under(LABEL_W, row![muted(tr("기존 그룹"))].extend(chips).spacing(6).align_y(Alignment::Center).wrap()));
     }
 
-    col = col.push(text(tr("환경")).size(11.5).color(theme::TEXT_2)).push(env_segment(d.env));
+    col = col.push(crate::form::field(LABEL_W, tr("환경"), crate::form::dropdown(&Env::ALL, d.env, Env::label, Message::HostEnv, ENV_W)));
     if d.env == Env::Prod {
-        col = col.push(muted(tr("운영 서버는 탭에 빨간 표시가 붙고, 변경 명령은 한 번 더 눌러야 실행되며, AI에 터미널 출력을 보내기 전에 확인합니다.")));
+        col = col.push(note(tr("운영 서버는 탭에 빨간 표시가 붙고, 변경 명령은 한 번 더 눌러야 실행되며, AI에 터미널 출력을 보내기 전에 확인합니다.")));
     }
 
     if let Some(e) = &ed.external {
@@ -262,17 +250,12 @@ fn basic_fields<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
             .push(password_field(ed));
         return col.into();
     }
-    col.push(
-        row![
-            field(tr("주소"), tr("IP 또는 도메인"), d.hostname.as_deref().unwrap_or(""), HostField::HostName),
-            field(tr("사용자"), tr("예: ubuntu"), d.user.as_deref().unwrap_or(""), HostField::User),
-            container(field(tr("포트"), "22", &ed.port, HostField::Port)).width(100),
-        ]
-        .spacing(10),
-    )
-    .push(password_field(ed))
-    .push(crate::ui_keys::picker(app, d.identity_file.as_deref()))
-    .into()
+    col.push(field(tr("주소"), tr("IP 또는 도메인"), d.hostname.as_deref().unwrap_or(""), HostField::HostName))
+        .push(field(tr("사용자"), tr("예: ubuntu"), d.user.as_deref().unwrap_or(""), HostField::User))
+        .push(crate::form::field(LABEL_W, tr("포트"), input("22", &ed.port, HostField::Port).width(PORT_W)))
+        .push(password_field(ed))
+        .push(column![crate::form::field(LABEL_W, tr("SSH 키"), crate::ui_keys::picker(app, d.identity_file.as_deref())), note(tr("설정 › SSH 키에서 키를 가져올 수 있습니다"))].spacing(4))
+        .into()
 }
 
 /// Auto tunnels: the saved ones, then the builder.
@@ -347,7 +330,7 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
     let body = container(crate::ui::scroll(container(body).padding(Padding::ZERO.right(12.0))));
     // Fixed height: switching tabs does not resize the dialog.
     let body = if ed.external.is_none() { body.height(EDITOR_BODY_H) } else { body.max_height(EDITOR_BODY_H) };
-    let mut col = column![text(title).size(14), body].spacing(12);
+    let mut col = column![body].spacing(12);
     if let Some(e) = &ed.error {
         col = col.push(text(e.clone()).size(11.5).color(theme::ERR_TX));
     }
@@ -367,7 +350,7 @@ pub fn editor<'a>(app: &'a CoShell, ed: &'a HostEditor) -> El<'a> {
         .spacing(8),
     );
     let border = env_color(d.env).map_or(theme::LINE_2, |c| alpha(c, 0.6));
-    container(col).padding(18).width(EDITOR_W).style(card_style(border)).into()
+    container(column![crate::form::title_bar(title), container(col).padding(18)]).padding(1).width(EDITOR_W).style(card_style(border)).into()
 }
 
 pub fn attach_confirm<'a>(app: &'a CoShell, tab_name: &'a str, a: &'a Attachment) -> El<'a> {

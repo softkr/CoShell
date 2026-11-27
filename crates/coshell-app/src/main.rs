@@ -7,9 +7,11 @@ mod ai;
 mod app;
 mod assist;
 mod blocks;
+mod branch;
 mod metrics;
 mod conn;
 mod files;
+mod form;
 mod context_menu;
 mod fonts;
 mod hangul;
@@ -108,8 +110,6 @@ fn main() -> iced::Result {
     .font(fonts::FILES[3])
     .font(fonts::FILES[4])
     .font(fonts::FILES[5])
-    .font(fonts::FILES[6])
-    .font(fonts::FILES[7])
     .subscription(CoShell::subscription)
     .window(window_settings(window))
     .default_font(fonts::SANS)

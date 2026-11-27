@@ -109,7 +109,7 @@ fn build() -> muda::Result<Menu> {
         true,
         &[
             &item("sidebar", tr("서버 사이드바"), Some((CMD, Code::KeyB))),
-            &item("ai-panel", tr("AI 패널"), Some((CMD, Code::KeyL))),
+            &item("ai-panel", tr("AI 대화"), Some((CMD, Code::KeyL))),
             &item("statusbar", tr("상태 표시줄"), Some((CMD, Code::KeyJ))),
             &sep(),
             &item("zoom-in", tr("글꼴 크게"), Some((CMD, Code::Equal))),

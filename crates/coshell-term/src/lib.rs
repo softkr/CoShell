@@ -86,52 +86,115 @@ impl EventListener for Listener {
 
 pub type SharedTerm = Arc<FairMutex<Term<Listener>>>;
 
+/// A stretch of a line that a program coloured: byte range of the line's text, its colour, bold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub start: usize,
+    pub end: usize,
+    pub fg: alacritty_terminal::vte::ansi::Color,
+    pub bold: bool,
+}
+
+/// A line of terminal text and the stretches of it drawn in a colour the program chose.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StyledLine {
+    pub text: String,
+    /// In order, not overlapping; text outside them is in the default colour.
+    pub runs: Vec<Run>,
+}
+
+impl From<&str> for StyledLine {
+    fn from(text: &str) -> Self {
+        Self { text: text.to_string(), runs: Vec::new() }
+    }
+}
+
+impl StyledLine {
+    /// Add `other` at the end, merging a run that carries straight on.
+    fn append(&mut self, other: StyledLine) {
+        let base = self.text.len();
+        self.text.push_str(&other.text);
+        for r in other.runs {
+            self.push_run(Run { start: r.start + base, end: r.end + base, ..r });
+        }
+    }
+
+    fn push_run(&mut self, r: Run) {
+        match self.runs.last_mut() {
+            Some(last) if last.end == r.start && (last.fg, last.bold) == (r.fg, r.bold) => last.end = r.end,
+            _ => self.runs.push(r),
+        }
+    }
+
+    /// Drop trailing blanks, and the parts of runs that covered them.
+    fn trim_end(&mut self) {
+        let len = self.text.trim_end().len();
+        self.text.truncate(len);
+        self.runs.retain_mut(|r| {
+            r.end = r.end.min(len);
+            r.start < r.end
+        });
+    }
+}
+
 /// The last `max_rows` rows with text (screen + scrollback) as lines, oldest first.
 /// Rows the terminal wrapped are joined back into one line; the blank screen
 /// area below the last text is skipped.
 pub fn logical_lines(term: &SharedTerm, max_rows: usize) -> Vec<String> {
+    styled_lines(term, max_rows).into_iter().map(|l| l.text).collect()
+}
+
+/// [`logical_lines`] with the colours programs gave the text (`ls` folders, `grep` matches …).
+pub fn styled_lines(term: &SharedTerm, max_rows: usize) -> Vec<StyledLine> {
     use alacritty_terminal::grid::Dimensions;
     use alacritty_terminal::index::{Column, Line};
     use alacritty_terminal::term::cell::Flags;
+    use alacritty_terminal::vte::ansi::{Color, NamedColor};
 
     let term = term.lock();
     let grid = term.grid();
     let top = -(grid.history_size() as i32);
     let bottom = grid.screen_lines() as i32 - 1;
     let last_col = Column(grid.columns().saturating_sub(1));
-    // (text, continues on the next row)
-    let mut rows: Vec<(String, bool)> = Vec::new();
+    // (line, continues on the next row)
+    let mut rows: Vec<(StyledLine, bool)> = Vec::new();
     for l in (top..=bottom).rev() {
         let row = &grid[Line(l)];
-        let text: String = (0..grid.columns())
-            .map(|c| &row[Column(c)])
-            .filter(|cell| !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER))
-            .map(|cell| cell.c)
-            .collect();
-        if rows.is_empty() && text.trim().is_empty() {
+        let mut line = StyledLine::default();
+        for cell in (0..grid.columns()).map(|c| &row[Column(c)]) {
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let start = line.text.len();
+            line.text.push(cell.c);
+            if cell.fg != Color::Named(NamedColor::Foreground) {
+                line.push_run(Run { start, end: line.text.len(), fg: cell.fg, bold: cell.flags.contains(Flags::BOLD) });
+            }
+        }
+        if rows.is_empty() && line.text.trim().is_empty() {
             continue; // blank screen area below the last text does not count
         }
-        rows.push((text, row[last_col].flags.contains(Flags::WRAPLINE)));
+        rows.push((line, row[last_col].flags.contains(Flags::WRAPLINE)));
         if rows.len() == max_rows {
             break;
         }
     }
     rows.reverse();
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<StyledLine> = Vec::new();
     let mut joining = false;
-    for (text, wraps) in rows {
+    for (line, wraps) in rows {
         match lines.last_mut() {
-            Some(prev) if joining => prev.push_str(&text),
-            _ => lines.push(text),
+            Some(prev) if joining => prev.append(line),
+            _ => lines.push(line),
         }
         if !wraps {
             if let Some(l) = lines.last_mut() {
-                *l = l.trim_end().to_string();
+                l.trim_end();
             }
         }
         joining = wraps;
     }
-    while lines.last().is_some_and(String::is_empty) {
+    while lines.last().is_some_and(|l| l.text.is_empty()) {
         lines.pop();
     }
     lines

@@ -1,5 +1,5 @@
-//! Bundled fonts (see `assets/fonts/README.md`): the design's Inter + Noto Sans KR
-//! (merged as "CoShell Sans") and JetBrains Mono.
+//! Bundled fonts (see `assets/fonts/README.md`): Inter + Noto Sans KR (merged as
+//! "CoShell Sans") for the interface, and Hack Nerd Font for the terminal.
 
 use iced::Font;
 
@@ -9,19 +9,18 @@ macro_rules! font_file {
     };
 }
 
-pub const FILES: [&[u8]; 8] = [
+pub const FILES: [&[u8]; 6] = [
     font_file!("CoShellSans-Regular.ttf"),
     font_file!("CoShellSans-Medium.ttf"),
     font_file!("CoShellSans-SemiBold.ttf"),
     font_file!("CoShellSans-Bold.ttf"),
-    font_file!("JetBrainsMono-Regular.ttf"),
-    font_file!("JetBrainsMono-Medium.ttf"),
-    font_file!("JetBrainsMono-SemiBold.ttf"),
-    font_file!("JetBrainsMono-Bold.ttf"),
+    // Regular and bold only: lighter emphasis (medium) draws as regular, semibold as bold.
+    font_file!("HackNerdFont-Regular.ttf"),
+    font_file!("HackNerdFont-Bold.ttf"),
 ];
 
 pub const SANS: Font = Font::with_name("CoShell Sans");
-pub const MONO: Font = Font::with_name("JetBrains Mono");
+pub const MONO: Font = Font::with_name("Hack Nerd Font");
 
 pub const fn weight(f: Font, w: iced::font::Weight) -> Font {
     Font { weight: w, ..f }
@@ -36,8 +35,8 @@ mod tests {
             db.load_font_data(f.to_vec());
         }
         let families: std::collections::BTreeSet<String> = db.faces().flat_map(|f| f.families.iter().map(|(n, _)| n.clone())).collect();
-        assert_eq!(families.into_iter().collect::<Vec<_>>(), ["CoShell Sans", "JetBrains Mono"]);
+        assert_eq!(families.into_iter().collect::<Vec<_>>(), ["CoShell Sans", "Hack Nerd Font"]);
         let weights: Vec<u16> = db.faces().map(|f| f.weight.0).collect();
-        assert_eq!(weights, [400, 500, 600, 700, 400, 500, 600, 700]);
+        assert_eq!(weights, [400, 500, 600, 700, 400, 700]);
     }
 }

@@ -16,6 +16,15 @@ use crate::i18n::{tf, tr};
 const MODE_MAX_LEN: usize = 4;
 /// Name a download gets when the server's name cannot be used as a local one.
 const FALLBACK_NAME: &str = "download";
+/// Folders of the other shells on this SSH connection (Linux), one per line: the
+/// terminal's shell is a sibling of this command under the connection's `sshd`.
+/// Run through `sh` so a csh login shell does not matter; the login shell itself,
+/// when it did not hand over to `sh`, is left out.
+const SHELL_DIRS: &str = r#"sh -c 'p=$PPID; case $(cat /proc/$p/comm 2>/dev/null) in sshd*) ;; *) p=$(ps -o ppid= -p $p | tr -d " ");; esac; for c in $(ps -o pid= --ppid $p); do [ "$c" = "$PPID" ] || [ "$c" = "$$" ] || readlink /proc/$c/cwd; done'"#;
+/// Bytes of [`SHELL_DIRS`] output read.
+const SHELL_DIRS_LIMIT: usize = 4096;
+/// How long [`SHELL_DIRS`] may take.
+const SHELL_DIRS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The tab's SFTP session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -127,7 +136,7 @@ pub struct Files {
     pub confirm: Option<FileConfirm>,
     /// Show the folder the terminal is in.
     pub follow: bool,
-    /// The terminal folder last acted on, so a folder is followed once.
+    /// The prompt's folder (as the prompt shows it) last acted on, so a folder is followed once.
     followed: Option<String>,
     pub edits: Vec<RemoteEdit>,
 }
@@ -204,6 +213,8 @@ pub enum FilesMsg {
     Follow(bool),
     /// Look where the terminal is now.
     FollowTick,
+    /// The prompt showed only this folder name; the shells' folders the server reported.
+    FollowFound(String, Result<String, String>),
     /// Fetch this file and open it in a local editor.
     Edit(String),
     /// Look for local saves of the files being edited.
@@ -258,6 +269,17 @@ pub fn prompt_dir(cwd: &str, home: &str) -> Option<String> {
         c if c.starts_with("~/") => Some(join(home, &c[2..])),
         c if c.starts_with('/') => Some(c.to_string()),
         // `[user@host dir]$` shows the last component only: not enough to go by.
+        _ => None,
+    }
+}
+
+/// The one folder named `name` among the [`SHELL_DIRS`] output, if exactly one.
+fn shell_dir(name: &str, out: &str) -> Option<String> {
+    let mut found: Vec<&str> = out.lines().filter(|l| l.starts_with('/') && (*l == name || l.rsplit('/').next() == Some(name))).collect();
+    found.sort_unstable();
+    found.dedup();
+    match found.as_slice() {
+        [one] => Some(one.to_string()),
         _ => None,
     }
 }
@@ -373,16 +395,37 @@ impl CoShell {
         }
     }
 
-    /// The terminal's folder for `id`, when its prompt shows one.
-    fn terminal_dir(&self, id: TabId) -> Option<String> {
+    /// The folder the terminal's prompt shows for `id` (`~/x`, `/x`, or just a name).
+    fn terminal_cwd(&self, id: TabId) -> Option<String> {
         let tab = self.tabs.iter().find(|t| t.id == id)?;
         let (prompt, _) = self.screen_of(tab)?.current?;
-        prompt_dir(&prompt.cwd, &tab.files.home)
+        Some(prompt.cwd).filter(|c| !c.is_empty())
+    }
+
+    /// Show the folder the prompt shows as `cwd`. A bare name is looked up on the server.
+    fn follow_to(&mut self, id: TabId, cwd: String) -> Task<Message> {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+        tab.files.followed = Some(cwd.clone());
+        if let Some(dir) = prompt_dir(&cwd, &tab.files.home) {
+            return if dir == tab.files.path { Task::none() } else { self.list_files(id, dir) };
+        }
+        let Some(conn) = tab.conn.clone() else { return Task::none() };
+        Task::perform(
+            async move {
+                let run = conn.exec(SHELL_DIRS, SHELL_DIRS_LIMIT);
+                match tokio::time::timeout(SHELL_DIRS_TIMEOUT, run).await {
+                    Ok(Ok(out)) => Ok(String::from_utf8_lossy(&out.output).into_owned()),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(_) => Err("timeout".to_string()),
+                }
+            },
+            move |r| Message::Files(id, FilesMsg::FollowFound(cwd, r)),
+        )
     }
 
     pub(crate) fn update_files(&mut self, id: TabId, m: FilesMsg) -> Task<Message> {
         // Read before the panel is borrowed for writing.
-        let terminal_dir = matches!(m, FilesMsg::FollowTick | FilesMsg::Follow(true)).then(|| self.terminal_dir(id)).flatten();
+        let terminal_cwd = matches!(m, FilesMsg::FollowTick | FilesMsg::Follow(true)).then(|| self.terminal_cwd(id)).flatten();
         let Some(f) = self.files_mut(id) else { return Task::none() };
         match m {
             FilesMsg::Opened(r) => match r.take() {
@@ -577,20 +620,25 @@ impl CoShell {
             FilesMsg::Follow(on) => {
                 f.follow = on;
                 f.followed = None;
-                if let (true, Some(dir)) = (on, terminal_dir) {
-                    f.followed = Some(dir.clone());
-                    return self.list_files(id, dir);
+                if let (true, Some(cwd)) = (on, terminal_cwd) {
+                    return self.follow_to(id, cwd);
                 }
             }
             FilesMsg::FollowTick => {
                 // Acted on once per change, so browsing elsewhere is not undone every second.
-                if let (true, Link::Ready, Some(dir)) = (f.follow, &f.link, terminal_dir)
-                    && f.followed.as_deref() != Some(dir.as_str())
+                if let (true, Link::Ready, Some(cwd)) = (f.follow, &f.link, terminal_cwd)
+                    && f.followed.as_deref() != Some(cwd.as_str())
                 {
-                    f.followed = Some(dir.clone());
-                    if dir != f.path {
-                        return self.list_files(id, dir);
-                    }
+                    return self.follow_to(id, cwd);
+                }
+            }
+            FilesMsg::FollowFound(name, r) => {
+                // Still following, and the prompt has not moved on meanwhile.
+                let dir = r.ok().and_then(|out| shell_dir(&name, &out));
+                if let (true, Some(dir)) = (f.follow && f.followed.as_deref() == Some(name.as_str()), dir)
+                    && dir != f.path
+                {
+                    return self.list_files(id, dir);
                 }
             }
             FilesMsg::Edit(name) => {
@@ -679,5 +727,17 @@ mod tests {
         assert_eq!(prompt_dir("~/app/logs", "/home/ops").as_deref(), Some("/home/ops/app/logs"));
         assert_eq!(prompt_dir("/var/log", "/home/ops").as_deref(), Some("/var/log"));
         assert_eq!(prompt_dir("logs", "/home/ops"), None);
+    }
+
+    #[test]
+    fn a_bare_folder_name_is_found_among_the_shells_folders() {
+        // The terminal's shell in /root/Veeam_Agent_DeploymentKit, another session in /root.
+        let out = "/root/Veeam_Agent_DeploymentKit\n/root\n";
+        assert_eq!(shell_dir("Veeam_Agent_DeploymentKit", out).as_deref(), Some("/root/Veeam_Agent_DeploymentKit"));
+        assert_eq!(shell_dir("Veeam_Agent_DeploymentKit", "/root/Veeam_Agent_DeploymentKit\n/root/Veeam_Agent_DeploymentKit\n").as_deref(), Some("/root/Veeam_Agent_DeploymentKit"), "same folder twice");
+        assert_eq!(shell_dir("/", "/\n").as_deref(), Some("/"));
+        assert_eq!(shell_dir("logs", "/srv/a/logs\n/srv/b/logs\n"), None, "two shells, two such folders: not guessed");
+        assert_eq!(shell_dir("logs", "/root\n"), None);
+        assert_eq!(shell_dir("logs", "readlink: permission denied\n"), None);
     }
 }

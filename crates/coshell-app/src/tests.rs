@@ -157,6 +157,8 @@ fn ui_run_button_sends_command_and_risky_ones_ask_twice() {
     assert!(matches!(tab.phase, Phase::Live(_)));
     tab.chat.turns.push(Turn { attachment: Some("최근 출력 12줄".into()), ..turn(Role::User, "nginx가 왜 안 뜨지?") });
     tab.chat.turns.push(turn(Role::Assistant, ANSWER));
+    // The conversation shows on the chat sheet (⌘L).
+    let _ = app.update(Message::AiToggle);
 
     let mut ui = simulator(ui::view(&app));
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
@@ -185,6 +187,8 @@ fn risk_badges_and_labels_render() {
     let tab = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
     tab.chat.turns.push(turn(Role::User, "q"));
     tab.chat.turns.push(turn(Role::Assistant, ANSWER));
+    // The conversation shows on the chat sheet (⌘L).
+    let _ = app.update(Message::AiToggle);
     let mut ui = simulator(ui::view(&app));
     // Read-only commands get no tag; destructive ones are marked.
     assert!(ui.find("조회").is_err());
@@ -552,7 +556,6 @@ fn server_page_groups_cards_and_actions() {
 #[test]
 fn long_tab_name_keeps_its_close_button() {
     let mut app = app();
-    app.ai.open = false;
     app.open_local();
     app.open_fake_ssh("root@hli-ncp-dev-srv-test-very-long-hostname-01", &["root@hli-ncp-dev-srv-test-very-long-hostname-01"], &[]);
     let mut ui = simulator(ui::view(&app));
@@ -569,7 +572,6 @@ fn file(name: &str, kind: coshell_ssh::FileKind, size: u64) -> coshell_ssh::File
 fn app_with_files() -> (CoShell, crate::app::TabId) {
     use coshell_ssh::FileKind::{Dir, File};
     let mut app = app();
-    app.ai.open = false;
     let id = app.open_fake_ssh("web-01", &["ops@web-01"], &[]);
     let _ = app.update(Message::SidebarTab(crate::app::SidebarTab::Files));
     let entries = vec![file("logs", Dir, 0), file("releases", Dir, 0), file("app.conf", File, 812), file("backup.tar.gz", File, 48_300_000)];
@@ -722,7 +724,7 @@ fn new_server_dialog_copy() {
             let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("new-server"));
         }
         // Connection fields are always in view; extras sit behind tabs.
-        for t in ["새 서버", "주소", "비밀번호", "SSH 키", "경유 서버", "터널", "저장"] {
+        for t in ["새 서버", "주소:", "비밀번호:", "SSH 키:", "경유 서버", "터널", "저장"] {
             ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
         }
         for gone in ["고급 설정", "자동 터널", "jumphost 서버", "ProxyJump", "IdentityFile", "새 호스트", "ssh 명령으로 채우기", "저장하고 연결"] {
@@ -731,7 +733,7 @@ fn new_server_dialog_copy() {
     }
     let _ = app.update(Message::HostTab(crate::app::HostTab::Tunnels));
     let mut ui = simulator(ui::view(&app));
-    ui.find("주소").expect("connection fields stay while switching tabs");
+    ui.find("주소:").expect("connection fields stay while switching tabs");
     for t in ["자동 터널", "서버 포트 열기", "내 PC 포트 공유", "SOCKS 프록시", "MySQL", "터널 추가"] {
         ui.find(t).unwrap_or_else(|_| panic!("tunnel builder: {t} missing"));
     }
@@ -997,7 +999,7 @@ fn zoom_shortcuts_change_clamp_and_persist_font_size() {
 
 #[test]
 fn settings_dialog_validates_applies_and_saves() {
-    use crate::app::Shortcut;
+    use crate::app::{SettingsTab, Shortcut};
     use crate::settings::{CursorKind, Scheme, Settings};
     use coshell_term::alacritty_terminal::vte::ansi::CursorShape;
     let dir = tempfile::tempdir().unwrap();
@@ -1011,21 +1013,38 @@ fn settings_dialog_validates_applies_and_saves() {
     assert!(!app.terminal_active(app.active_tab().unwrap()));
     {
         let mut ui = simulator(ui::view(&app));
-        ui.find("터미널 모양").expect("dialog");
-        ui.find("터미널 출력 검색").expect("shortcut reference");
+        ui.find("화면 언어:").expect("dialog opens on the general page");
         if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
             let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("settings"));
         }
     }
+    let _ = app.update(Message::SettingsTab(SettingsTab::Shortcuts));
+    simulator(ui::view(&app)).find("터미널 출력 검색:").expect("shortcut reference");
+    let _ = app.update(Message::SettingsTab(SettingsTab::Terminal));
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("글씨 모양").expect("terminal page, text tab");
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("settings-terminal"));
+        }
+    }
+    // The steppers move numbers within their limits.
+    let _ = app.update(Message::SettingsScrollbackStep(1));
+    assert_eq!(app.settings_draft.as_ref().unwrap().scrollback, "11000");
+    let _ = app.update(Message::SettingsAttachLines("15".into()));
+    let _ = app.update(Message::SettingsAttachLinesStep(-1));
+    assert_eq!(app.settings_draft.as_ref().unwrap().attach_lines, "10", "not below the minimum");
     let _ = app.update(Message::SettingsScheme(Scheme::Light));
     let _ = app.update(Message::SettingsCursor(CursorKind::Beam));
     let _ = app.update(Message::SettingsOptionMeta(false));
     let _ = app.update(Message::SettingsFontSize(2));
 
-    // Bad numbers keep the dialog open and change nothing.
+    // Bad numbers keep the dialog open, on the tab where the number is, and change nothing.
+    let _ = app.update(Message::SettingsTab(SettingsTab::General));
     let _ = app.update(Message::SettingsScrollback("lots".into()));
     let _ = app.update(Message::SettingsSave);
     assert!(app.settings_draft.as_ref().is_some_and(|d| d.error.is_some()));
+    assert_eq!(app.settings_draft.as_ref().map(|d| (d.tab, d.term_tab)), Some((SettingsTab::Terminal, crate::app::TermTab::Scrolling)));
     assert_eq!(app.settings, Settings::default());
     assert!(!path.exists());
 
@@ -1061,20 +1080,17 @@ fn settings_dialog_validates_applies_and_saves() {
 }
 
 #[test]
-fn window_size_and_ai_panel_are_remembered() {
+fn window_size_is_remembered() {
     use crate::settings::Settings;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.toml");
     let mut app = app();
     app.settings_path = Some(path.clone());
     let _ = app.update(Message::WindowResized(iced::Size::new(900.0, 620.0)));
-    let _ = app.update(Message::AiToggle);
     assert!(!path.exists(), "written after a delay, not on every event");
     let _ = app.update(Message::PersistState);
     let saved = Settings::load(&path).unwrap();
     assert_eq!((saved.window.width, saved.window.height), (900.0, 620.0));
-    assert_eq!(saved.ai_panel_open, app.ai.open);
-    assert!(!saved.ai_panel_open);
 }
 
 #[test]
@@ -1322,40 +1338,17 @@ fn notices_are_toasts_and_unsafe_links_are_refused() {
 }
 
 #[test]
-fn ai_panel_greets_with_the_server_name_not_the_terminal_title() {
+fn chat_greets_with_the_server_name_not_the_terminal_title() {
     let mut app = app();
     let id = app.open_local();
     let tab = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
     tab.name = "console".into();
     tab.title = "ubuntu@console: ~".into();
-    app.ai.open = true;
+    let _ = app.update(Message::AiToggle);
     simulator(ui::view(&app)).find("console에 대해서 물어보세요").expect("server name");
     // A name the user typed for the tab wins.
     app.tabs.iter_mut().find(|t| t.id == id).unwrap().custom_name = Some("운영 콘솔".into());
     simulator(ui::view(&app)).find("운영 콘솔에 대해서 물어보세요").expect("custom name");
-}
-
-#[test]
-fn ai_panel_width_follows_the_divider_within_limits() {
-    use crate::settings::AI_PANEL_W_MIN;
-    let mut app = app();
-    let _ = app.update(Message::WindowResized(iced::Size::new(1200.0, 760.0)));
-    let _ = app.update(Message::AiResizeStart);
-    let _ = app.update(Message::AiResizeTo(700.0));
-    assert_eq!(app.settings.ai_panel_width, 500.0);
-    let _ = app.update(Message::AiResizeTo(1190.0));
-    assert_eq!(app.settings.ai_panel_width, AI_PANEL_W_MIN);
-    let _ = app.update(Message::AiResizeTo(0.0));
-    // 1200 − sidebar 256 − terminal minimum 320; below AI_PANEL_W_MAX.
-    assert_eq!(app.settings.ai_panel_width, 624.0);
-    // A narrow window keeps room for the terminal (and the server sidebar).
-    let _ = app.update(Message::WindowResized(iced::Size::new(800.0, 600.0)));
-    let _ = app.update(Message::AiResizeTo(0.0));
-    assert_eq!(app.settings.ai_panel_width, AI_PANEL_W_MIN);
-    let _ = app.update(Message::SidebarToggle);
-    let _ = app.update(Message::AiResizeTo(0.0));
-    assert_eq!(app.settings.ai_panel_width, 480.0);
-    let _ = app.update(Message::AiResizeEnd);
 }
 
 #[test]
@@ -1591,21 +1584,28 @@ fn settings_dialog_holds_servers_and_ai_pages() {
 }
 
 #[test]
-fn ai_panel_toggles_from_the_title_bar_and_tabs_stay_compact() {
+fn chat_opens_and_closes_with_its_shortcut_and_tabs_stay_compact() {
     let mut app = app();
     app.open_local();
-    app.open_local();
-    app.ai.open = true;
-    let _ = app.update(Message::AiToggle);
-    assert!(!app.ai.open);
+    let id = app.open_local();
+    assert!(app.ask.is_none(), "closed until asked for");
     let mut ui = simulator(ui::view(&app));
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
         let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("ai-closed"));
     }
-    assert!(ui.find("터미널 출력은 직접 첨부할 때만 전송됩니다").is_err(), "panel hidden");
+    assert!(ui.find("터미널 출력은 직접 첨부할 때만 전송됩니다").is_err(), "chat hidden");
     drop(ui);
+    // ⌘L: the conversation rises over the terminal, with its tools; again, and it is gone.
     let _ = app.update(Message::AiToggle);
-    simulator(ui::view(&app)).find("터미널 출력은 직접 첨부할 때만 전송됩니다").expect("panel shown");
+    assert_eq!(app.ask, Some((id, "#".to_string())));
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("터미널 출력은 직접 첨부할 때만 전송됩니다").expect("chat shown");
+        ui.find("컨텍스트 연동").expect("its tools");
+    }
+    let _ = app.update(Message::AiToggle);
+    assert!(app.ask.is_none());
+    assert!(simulator(ui::view(&app)).find("터미널 출력은 직접 첨부할 때만 전송됩니다").is_err());
 }
 
 /// Throwaway keys generated for these tests only.
@@ -1802,6 +1802,7 @@ fn agent_runs_a_read_only_command_reads_it_and_carries_on() {
     assert!(chat.is_streaming() && chat.turns[3].role == Role::Assistant);
 
     // The chat shows one compact line for the command, never the hidden turn; output opens on click.
+    app.ask = Some((id, "#".into()));
     let mut ui = simulator(ui::view(&app));
     ui.find("실행 완료").expect("compact command line");
     assert!(ui.find("<command_result").is_err());
@@ -2044,11 +2045,12 @@ fn readme_screenshots() {
             "**apache2**가 80번 포트를 잡고 있어서 nginx가 시작을 못 하고 있어요.\n\n| 포트 | 프로세스 | PID |\n|---|---|---|\n| 80 | apache2 | 912 |\n\napache2를 멈추고 nginx를 다시 올리면 됩니다. 운영 서버라 실행은 직접 눌러 주세요.\n```bash\nsudo systemctl stop apache2 && sudo systemctl restart nginx\n```",
         ));
     }
+    // The conversation shows on the chat sheet (⌘L).
+    let _ = app.update(Message::AiToggle);
     shot(&app, "hero");
 
     // 2. Server board: groups, environments, jump hosts.
     let mut app = app_with(cfg, store.clone(), None, ai_with("claude", &[]));
-    app.ai.open = false;
     shot(&app, "servers");
 
     // 3. Server editor: block-built auto tunnel.
@@ -2072,7 +2074,6 @@ fn readme_screenshots() {
         None,
         Arc::new(MemSecrets::default()),
     );
-    app.ai.open = false;
     for (name, key, note) in [("work-deploy", TEST_KEY, "운영 배포용"), ("homelab", TEST_KEY_ENCRYPTED, "")] {
         let _ = app.update(Message::SettingsOpen);
         let _ = app.update(Message::KeyImportOpen);
@@ -2100,10 +2101,11 @@ fn readme_screenshots() {
 fn korean_being_composed_is_drawn_inline() {
     let mut app = app();
     let _ = quiet_tab(&mut app);
+    let _ = app.update(Message::AiToggle);
     fn compose(app: &CoShell) -> iced_test::Simulator<'_, Message> {
         use iced::advanced::input_method;
         let mut ui = simulator(ui::view(app));
-        ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+        ui.click(iced::widget::Id::new(crate::app::ASK_INPUT)).expect("chat field");
         let _ = ui.simulate([
             iced::Event::InputMethod(input_method::Event::Opened),
             iced::Event::InputMethod(input_method::Event::Preedit("한글입ㄹ".into(), None)),
@@ -2132,6 +2134,8 @@ fn run_button_waits_for_the_reply_and_turns_into_progress_once_pressed() {
     use crate::ui_ai::RUN_BTN;
     let mut app = app();
     let id = quiet_tab(&mut app);
+    // The conversation shows on the chat sheet (⌘L).
+    let _ = app.update(Message::AiToggle);
     let cmd = "sudo systemctl restart nginx"; // a change: never run by the assistant itself
     let answer = format!("재시작할게요.\n```bash\n{cmd}\n```");
     let has_run_button = |app: &CoShell| simulator(ui::view(app)).find(iced::widget::Id::new(RUN_BTN)).is_ok();
@@ -2230,7 +2234,7 @@ fn composing_syllable_is_kept_when_the_caret_moves_away() {
     use iced::keyboard::key::Named;
     let mut app = app();
     let id = quiet_tab(&mut app);
-    let draft = |app: &CoShell| app.tabs.iter().find(|t| t.id == id).unwrap().chat.draft.text().trim_end().to_string();
+    let draft = |app: &CoShell| app.ask.as_ref().map_or(String::new(), |(_, q)| q.trim_start_matches('#').to_string());
     // "한국" committed, "어" still composing, then something moves the caret.
     let typing = |last: iced::Event| {
         vec![
@@ -2245,9 +2249,9 @@ fn composing_syllable_is_kept_when_the_caret_moves_away() {
         ("arrow key", iced_test::simulator::press_key(Named::ArrowLeft, None), true),
         ("click elsewhere", iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)), false),
     ] {
-        let _ = app.update(Message::AiNewChat(id));
+        app.ask = Some((id, "#".into()));
         let mut ui = simulator(ui::view(&app));
-        ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+        ui.click(iced::widget::Id::new(crate::app::ASK_INPUT)).expect("chat field");
         let mut events = typing(last);
         if os_also_commits {
             // Some input methods commit the syllable themselves right after: it must not double.
@@ -2301,10 +2305,11 @@ fn input_method_lets_go_of_a_syllable_the_app_committed() {
     use iced::keyboard::key::Named;
     let mut app = app();
     let _id = quiet_tab(&mut app);
+    let _ = app.update(Message::AiToggle);
     let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let probe = ImeProbe { content: ui::view(&app), seen: seen.clone() };
     let mut ui = simulator(iced::Element::new(probe));
-    ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+    ui.click(iced::widget::Id::new(crate::app::ASK_INPUT)).expect("chat field");
     let redraw = || iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
     // "솔" composing; the caret moves away, so the app commits it itself. macOS still holds it as
     // marked text and would type it again on the next key, into whatever field has the caret then:
@@ -2326,8 +2331,9 @@ fn enter_sends_the_composing_syllable_once() {
     use iced::keyboard::key::Named;
     let mut app = app();
     let id = quiet_tab(&mut app);
+    let _ = app.update(Message::AiToggle);
     let mut ui = simulator(ui::view(&app));
-    ui.click(iced::widget::Id::new(crate::ai::AI_INPUT)).expect("composer");
+    ui.click(iced::widget::Id::new(crate::app::ASK_INPUT)).expect("chat field");
     // macOS on Enter while "응" is composing: it commits the syllable, then delivers the Enter, in one go.
     let _ = ui.simulate([
         iced::Event::InputMethod(Ime::Opened),
@@ -2358,7 +2364,6 @@ fn design_sample_screen() {
     }
     let mut app = app_with("", store, None, ai_with("ollama", &[]));
     let _ = app.update(Message::WindowResized(iced::Size::new(1440.0, 900.0)));
-    app.settings.ai_panel_width = 370.0;
     let id = app.open_local();
     let dev = app.open_local();
     let _ = app.update(Message::Activate(id));
@@ -2402,7 +2407,8 @@ fn design_sample_screen() {
     load_fonts();
     let settings = iced::Settings { default_font: crate::fonts::SANS, ..Default::default() };
     let mut ui = iced_test::Simulator::with_size(settings, (1440.0, 900.0), ui::view(&app));
-    for t in ["사용자", "ops@app-01", "df -h /var", "06:34:12", "SSH 연결됨", "지연시간: ", "22ms", "Ubuntu 22.04 LTS", "운영 안전 잠금 ON"] {
+    // The cards say where a command ran with a folder chip; who is in the status bar.
+    for t in ["사용자", "ops@app-01 (192.168.10.42)", "df -h /var", "06:34:12", "SSH 연결됨", "지연시간: ", "22ms", "Ubuntu 22.04 LTS", "운영 안전 잠금 ON"] {
         ui.find(t).unwrap_or_else(|_| panic!("{t} missing"));
     }
     if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
@@ -2415,17 +2421,12 @@ fn design_sample_screen() {
 fn layout_buttons_hide_and_show_panels() {
     let mut app = app();
     app.open_local();
-    assert!(app.settings.sidebar_open && app.ai.open && app.settings.statusbar_open);
+    assert!(app.settings.sidebar_open && app.settings.statusbar_open);
     let _ = app.update(Message::SidebarToggle);
-    let _ = app.update(Message::AiToggle);
-    assert!(!app.settings.sidebar_open && !app.ai.open);
-    let mut ui = simulator(ui::view(&app));
-    ui.find("세션 없음").expect_err("a session is open");
-    ui.find("AI 채팅").expect_err("AI panel hidden");
-    drop(ui);
+    assert!(!app.settings.sidebar_open);
+    simulator(ui::view(&app)).find("세션 없음").expect_err("a session is open");
     let _ = app.update(Message::SidebarToggle);
-    let _ = app.update(Message::AiToggle);
-    assert!(app.settings.sidebar_open && app.ai.open);
+    assert!(app.settings.sidebar_open);
     // The status bar has no header button but still toggles from ⌘J and the menu.
     let _ = app.update(Message::StatusBarToggle);
     assert!(!app.settings.statusbar_open);
@@ -2447,11 +2448,25 @@ fn hash_at_an_empty_prompt_asks_in_an_app_field() {
     let _ = app.update(Message::Input(id, b"#".to_vec()));
     assert_eq!(app.ask, Some((id, "#".to_string())), "# opens the question field instead of reaching the shell");
     let _ = app.update(Message::AskInput("#디스크 사용량".into()));
-    simulator(ui::view(&app)).find("Enter 질문 · Esc 취소").expect("question hint shows");
+    simulator(ui::view(&app)).find("Enter 질문 · Esc 닫기").expect("question hint shows");
+    // Sent: the answer comes on the sheet over the terminal, and the field stays open for the next question.
     let _ = app.update(Message::AskSubmit);
-    assert!(app.ask.is_none());
-    assert!(app.ai.open);
-    assert_eq!(app.notice.as_deref(), Some("터미널에서 AI에게 질문을 전달했습니다"));
+    assert_eq!(app.ask, Some((id, "#".to_string())), "still in question mode, the field cleared");
+    let chat = &app.tabs.iter().find(|t| t.id == id).unwrap().chat;
+    assert!(chat.turns.iter().any(|t| t.text == "디스크 사용량") || chat.error.is_some(), "the question reached the chat");
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("Enter 질문 · Esc 닫기").expect("the dock is still the chat's input");
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join("chat-sheet"));
+        }
+    }
+    // Enter with nothing typed sends nothing.
+    let before = app.tabs.iter().find(|t| t.id == id).unwrap().chat.turns.len();
+    let _ = app.update(Message::AskSubmit);
+    assert_eq!(app.tabs.iter().find(|t| t.id == id).unwrap().chat.turns.len(), before);
+    let _ = app.update(Message::AskCancel);
+    assert!(app.ask.is_none(), "Esc closes the conversation");
 
     // Deleting the # goes back to the shell; Esc too.
     let _ = app.update(Message::Input(id, b"#".to_vec()));
@@ -2487,8 +2502,9 @@ fn input_dock_stays_while_a_command_runs() {
     assert_eq!(app.run_input, Some((id, "#".to_string())), "# opens the field instead of reaching the program");
     let _ = app.update(Message::RunInput("#왜 느려?".into()));
     let _ = app.update(Message::RunSubmit);
-    assert!(app.run_input.is_none() && app.ai.open);
-    assert_eq!(app.notice.as_deref(), Some("터미널에서 AI에게 질문을 전달했습니다"));
+    assert!(app.run_input.is_none());
+    assert_eq!(app.ask, Some((id, "#".to_string())), "the question opens the chat over the terminal");
+    let _ = app.update(Message::AskCancel);
 
     // Clearing the field or Esc gives the keyboard back to the terminal.
     let _ = app.update(Message::Input(id, b"#".to_vec()));
@@ -2559,6 +2575,38 @@ fn trailing_space_at_the_prompt_is_kept() {
     // With the cursor moved back into the word, nothing is added.
     feed(&app, id, b"\x1b[3D");
     assert_eq!(typed(&app).as_deref(), Some("sudo"));
+}
+
+#[test]
+fn clicking_the_prompt_bar_gives_the_keyboard_back_to_the_shell() {
+    use crate::blocks::Sig;
+    let mut app = app();
+    let id = app.open_local();
+    feed(&app, id, b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ ls\r\nlinux\r\nops@app-01:~$ ");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().sig = Some(Sig::UserHost("ops@app-01".into()));
+    assert!(app.screen_of(app.tabs.iter().find(|t| t.id == id).unwrap()).is_some(), "block view");
+
+    // A click elsewhere (the file panel) takes the keyboard off the terminal; the bar must bring it back.
+    let mut ui = simulator(ui::view(&app));
+    ui.click("명령어 입력 (Tab 자동완성 · '#'으로 바로 AI 질문)...").expect("prompt bar shown");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::FocusTerminal)), "{messages:?}");
+}
+
+#[test]
+fn block_output_keeps_the_colours_ls_gave_it() {
+    use crate::blocks::Sig;
+    let mut app = app();
+    let id = app.open_local();
+    // Let the real shell's own start-up output land first, so it cannot interleave with ours.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    feed(&app, id, b"\x1b[H\x1b[2J\x1b[3Jops@app-01:~$ ls\r\n\x1b[01;34mlinux\x1b[0m  \x1b[01;32mrun.sh\x1b[0m  notes.txt\r\nops@app-01:~$ ");
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().sig = Some(Sig::UserHost("ops@app-01".into()));
+    let screen = app.screen_of(app.tabs.iter().find(|t| t.id == id).unwrap()).expect("block view");
+    let line = &screen.blocks[0].output[0];
+    let coloured: Vec<&str> = line.runs.iter().map(|r| &line.text[r.start..r.end]).collect();
+    assert_eq!(coloured, ["linux", "run.sh"], "folder and executable coloured, the plain file not");
+    simulator(ui::view(&app)).find("linux  run.sh  notes.txt").expect("drawn as one output line");
 }
 
 #[test]
@@ -2638,4 +2686,51 @@ fn resource_meter_fills_its_share() {
         assert_eq!(widths.len(), want.len(), "{val}%: {widths:?}");
         assert!(widths.iter().zip(&want).all(|(a, b)| (a - b).abs() <= 1.0), "{val}%: {widths:?}, want {want:?}");
     }
+}
+
+#[test]
+fn scrollbar_shows_only_while_scrolling() {
+    let mut app = app();
+    let shown = |app: &CoShell| app.scrollbar_shown();
+    assert!(!shown(&app), "hidden at rest");
+    let _ = app.update(Message::Scrolled(7));
+    assert!(shown(&app), "shows once an area moves");
+    // Still scrolling: it stays.
+    let _ = app.update(Message::ScrollbarTick);
+    assert!(shown(&app));
+    // Scrolling stopped a moment ago: it is fading, not gone at once.
+    app.rewind_scroll(std::time::Duration::from_millis(1000));
+    let _ = app.update(Message::ScrollbarTick);
+    assert!(shown(&app), "mid-fade");
+    // Faded out: gone.
+    app.rewind_scroll(std::time::Duration::from_secs(2));
+    let _ = app.update(Message::ScrollbarTick);
+    assert!(!shown(&app));
+}
+
+#[test]
+fn prompt_dock_shows_system_folder_and_branch() {
+    use crate::blocks::Sig;
+    let mut app = app();
+    let id = app.open_local();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    feed(&app, id, b"\x1b[H\x1b[2J\x1b[3J[root@srv-1 src]# ");
+    {
+        let t = app.tabs.iter_mut().find(|t| t.id == id).unwrap();
+        t.sig = Some(Sig::UserHost("root@srv-1".into()));
+        t.stats = Some(crate::metrics::Stats { os: Some("Red Hat Enterprise Linux 9.4 (Plow)".into()), ..Default::default() });
+    }
+    // No branch known yet: the folder (the system is a picture).
+    {
+        let mut ui = simulator(ui::view(&app));
+        ui.find("src").expect("the folder the prompt shows");
+        assert!(ui.find("main").is_err());
+    }
+    // The answer for this folder arrives: the branch shows. One for a folder since left is dropped.
+    let key = ("src".to_string(), 0);
+    app.tabs.iter_mut().find(|t| t.id == id).unwrap().git.asked = Some(key.clone());
+    let _ = app.update(Message::BranchFound(id, ("old".into(), 0), Some("stale".into())));
+    assert_eq!(app.tabs.iter().find(|t| t.id == id).unwrap().git.branch, None);
+    let _ = app.update(Message::BranchFound(id, key, Some("main".into())));
+    simulator(ui::view(&app)).find("main").expect("the branch");
 }

@@ -241,16 +241,11 @@ pub(crate) fn chosen_key_label(app: &CoShell, current: Option<&str>) -> String {
 /// Server editor: which key to log in with.
 pub fn picker<'a>(app: &'a CoShell, current: Option<&'a str>) -> El<'a> {
     let (choices, selected) = key_choices(app, current);
-    column![
-        label(tr("SSH 키")),
-        pick_list(choices, Some(selected), |c: KeyChoice| Message::HostField(HostField::Identity, c.value))
-            .text_size(12)
-            .padding([7, 10])
-            .width(Length::Fill)
-            .style(crate::ui::pick_style)
-            .menu_style(crate::ui::menu_style),
-        muted(tr("설정 › SSH 키에서 키를 가져올 수 있습니다")),
-    ]
-    .spacing(4)
-    .into()
+    pick_list(choices, Some(selected), |c: KeyChoice| Message::HostField(HostField::Identity, c.value))
+        .text_size(12)
+        .padding([7, 10])
+        .width(Length::Fill)
+        .style(crate::ui::pick_style)
+        .menu_style(crate::ui::menu_style)
+        .into()
 }

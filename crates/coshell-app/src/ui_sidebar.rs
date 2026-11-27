@@ -185,34 +185,35 @@ fn servers(app: &CoShell) -> El<'_> {
                 // Connecting takes the plug icon, so a stray click on the row does nothing.
                 let msg = open_tab.map(|t| Message::Activate(t.id));
                 let disk = open_tab.and_then(|t| t.stats.as_ref()).map(|s| s.disk).filter(|d| *d >= 85);
-                let on = |c: Color| if active { Color::WHITE } else { c };
                 let mono_medium = crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Medium);
                 let names = column![
-                    text(app.display_of(&alias)).size(12.5).font(mono_medium).color(on(theme::TEXT)).wrapping(text::Wrapping::None),
-                    text(e.host().to_string()).size(10).font(crate::fonts::MONO).color(if active { alpha(Color::WHITE, 0.75) } else { theme::TEXT_3 }).wrapping(text::Wrapping::None),
+                    text(app.display_of(&alias)).size(12.5).font(mono_medium).color(theme::TEXT).wrapping(text::Wrapping::None),
+                    text(e.host().to_string()).size(10).font(crate::fonts::MONO).color(if active { theme::TEXT_2 } else { theme::TEXT_3 }).wrapping(text::Wrapping::None),
                 ]
                 .spacing(1);
-                let mut line = row![dot(on(color), 8.0), container(names).width(Length::Fill).clip(true)].spacing(10).align_y(Alignment::Center);
+                let mut line = row![dot(color, 8.0), container(names).width(Length::Fill).clip(true)].spacing(10).align_y(Alignment::Center);
                 if let Some(d) = disk {
-                    line = line.push(container(mono(format!("{d}%"), 10.0, on(theme::WARN))).padding([1, 6]).style(move |_| container::Style {
-                        background: Some(Background::Color(if active { alpha(Color::WHITE, 0.2) } else { alpha(theme::WARN, 0.15) })),
+                    line = line.push(container(mono(format!("{d}%"), 10.0, theme::WARN)).padding([1, 6]).style(move |_| container::Style {
+                        background: Some(Background::Color(alpha(theme::WARN, 0.15))),
                         border: Border { radius: 999.0.into(), ..Default::default() },
                         ..Default::default()
                     }));
                 }
-                line = line.push(link_icon(open_tab, &alias, active, hovered || menu_open));
+                line = line.push(link_icon(open_tab, &alias, hovered || menu_open));
                 let row_btn = button(line).width(Length::Fill).padding([7, 10]).on_press_maybe(msg).style(move |_, st| {
                         let hover = hovered || menu_open || matches!(st, button::Status::Hovered | button::Status::Pressed);
                         button::Style {
+                            // The open server: a wash of the accent and its outline. The solid accent is
+                            // kept for where you are (the prompt's folder) and what sends.
                             background: Some(Background::Color(if active {
-                                theme::ACCENT
+                                alpha(theme::ACCENT, 0.16)
                             } else if hover {
                                 alpha(Color::WHITE, 0.075)
                             } else {
                                 Color::TRANSPARENT
                             })),
                             text_color: theme::TEXT,
-                            border: Border { radius: 10.0.into(), ..Default::default() },
+                            border: Border { color: if active { alpha(theme::ACCENT, 0.55) } else { Color::TRANSPARENT }, width: 1.0, radius: 10.0.into() },
                             ..Default::default()
                         }
                     });
@@ -234,7 +235,7 @@ fn servers(app: &CoShell) -> El<'_> {
 /// The host's connection at a glance: a plug in its socket while connected (coloured like its
 /// tab's dot), pulled apart otherwise. Hovered, it turns into the action: unplug to disconnect
 /// (which asks first), plug to connect or reconnect.
-fn link_icon<'a>(open_tab: Option<&crate::app::Tab>, alias: &str, active: bool, hovered: bool) -> El<'a> {
+fn link_icon<'a>(open_tab: Option<&crate::app::Tab>, alias: &str, hovered: bool) -> El<'a> {
     let live = open_tab.is_some_and(|t| matches!(t.phase, Phase::Live(_)) && !t.exited);
     let action = match open_tab {
         Some(t) if live => Some((&UNPLUG, tr("연결 해제"), Message::Close(t.id), theme::ERR_TX)),
@@ -244,12 +245,12 @@ fn link_icon<'a>(open_tab: Option<&crate::app::Tab>, alias: &str, active: bool, 
     };
     let Some((icon, label, msg, color)) = action.filter(|_| hovered) else {
         let icon = if live { &PLUG } else { &UNPLUG };
-        let color = if active { Color::WHITE } else { open_tab.map_or(theme::TEXT_3, crate::ui::tab_color) };
+        let color = open_tab.map_or(theme::TEXT_3, crate::ui::tab_color);
         return container(crate::icons::tinted(icon, 14.0, color)).center(24).into();
     };
-    let fg = if active { Color::WHITE } else { color };
+    let fg = color;
     let b = button(container(crate::icons::tinted(icon, 14.0, fg)).center(24)).padding(0).on_press(msg).style(move |_, st| button::Style {
-        background: Some(Background::Color(alpha(if active { Color::WHITE } else { fg }, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.25 } else { 0.12 }))),
+        background: Some(Background::Color(alpha(fg, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.25 } else { 0.12 }))),
         border: Border { radius: 6.0.into(), ..Default::default() },
         ..Default::default()
     });

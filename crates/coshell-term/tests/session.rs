@@ -171,3 +171,28 @@ fn logical_lines_join_wrapped_rows() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+#[test]
+fn styled_lines_keep_the_colours_programs_chose() {
+    use coshell_term::alacritty_terminal::vte::ansi::{Color, NamedColor};
+    let size = GridSize { cols: 10, rows: 5, ..GridSize::DEFAULT };
+    let cap = Arc::new(Capture::default());
+    // `ls --color`: a bold blue folder, a plain file, then green text wrapping onto the next row.
+    let out = b"\x1b[01;34mlinux\x1b[0m a.txt\r\n\x1b[32mrun-me-please.sh\x1b[0m\r\n$ ";
+    let s = Session::new(cap, Box::new(Cursor::new(&out[..])), size);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let lines = coshell_term::styled_lines(s.term(), 50);
+        if lines.last().map(|l| l.text.as_str()) == Some("$") || Instant::now() > deadline {
+            let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+            assert_eq!(texts, ["linux a.txt", "run-me-please.sh", "$"]);
+            let blue = Color::Named(NamedColor::Blue);
+            assert_eq!(lines[0].runs, [coshell_term::Run { start: 0, end: 5, fg: blue, bold: true }], "only the folder is coloured");
+            let green = Color::Named(NamedColor::Green);
+            assert_eq!(lines[1].runs, [coshell_term::Run { start: 0, end: 16, fg: green, bold: false }], "one run across the wrap");
+            assert!(lines[2].runs.is_empty());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

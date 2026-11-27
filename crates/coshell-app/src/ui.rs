@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::app::{CONFIRM_INPUT, CoShell, PALETTE_INPUT, Pending, Phase, RENAME_INPUT, SEARCH_INPUT, Search, Step, Tab, prompt_input_id};
 use crate::app::{Message, PaletteItem};
-use crate::icons::{ARROW_DOWN, ARROW_UP, LOCK, LOCK_OPEN, SEARCH, TRASH, X};
+use crate::icons::{ARROW_DOWN, ARROW_UP, ERASER, LOCK, LOCK_OPEN, SEARCH, X};
 use crate::terminal::TerminalView;
 use crate::hosts::Env;
 use crate::theme::{self, alpha};
@@ -21,7 +21,6 @@ use crate::ui_hosts::env_color;
 /// Top bar: session pill, safety lock, layout buttons. On macOS the window buttons sit in it,
 /// so it is as tall as puts them on its centre line.
 pub(crate) const HEADER_H: f32 = if cfg!(target_os = "macos") { 38.0 } else { 44.0 };
-const PILL_MAX_W: f32 = 320.0;
 /// Session tab strip above the terminal.
 pub(crate) const BAR_H: f32 = 44.0;
 const TAB_MAX_W: f32 = 240.0;
@@ -54,6 +53,9 @@ pub(crate) const R_ROW: f32 = 9.0;
 /// Vertical scrollbars: thin, neutral and trackless (iced's default is 10px with an indigo thumb).
 const SCROLLBAR_W: f32 = 6.0;
 const SCROLLBAR_MARGIN: f32 = 2.0;
+/// Whiteness of the scroller: while scrolling, and under the pointer.
+const SCROLLER: f32 = 0.18;
+const SCROLLER_HOT: f32 = 0.35;
 pub(crate) const R_PILL: f32 = 999.0;
 
 pub(crate) const MEDIUM: Font = Font { weight: iced::font::Weight::Medium, ..crate::fonts::SANS };
@@ -152,22 +154,48 @@ pub(crate) fn tip<'a>(content: impl Into<El<'a>>, label: impl text::IntoFragment
     tooltip(content, bubble, pos).gap(4).into()
 }
 
-/// A vertically scrolling area with the app's thin scrollbar.
-pub(crate) fn scroll<'a>(content: impl Into<El<'a>>) -> scrollable::Scrollable<'a, Message> {
-    let bar = scrollable::Scrollbar::new().width(SCROLLBAR_W).scroller_width(SCROLLBAR_W).margin(SCROLLBAR_MARGIN);
-    scrollable(content).direction(scrollable::Direction::Vertical(bar)).style(scroll_style)
+/// The scroll area that moved last (0: none lately). Its scrollbar shows until the app
+/// hides it again, a moment after scrolling stops.
+static SCROLLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How strongly that scrollbar shows, as the bits of an `f32` from 1 (shown) to 0 (faded away).
+static SCROLLBAR_OPACITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Show `area`'s scrollbar (and no other) at `opacity`, or with area 0 hide them all.
+pub(crate) fn show_scrollbar(area: u64, opacity: f32) {
+    SCROLLED.store(area, std::sync::atomic::Ordering::Relaxed);
+    SCROLLBAR_OPACITY.store(opacity.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
-fn scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+/// Change how strongly the scrollbar now showing shows (it fades out).
+pub(crate) fn fade_scrollbar(opacity: f32) {
+    SCROLLBAR_OPACITY.store(opacity.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A vertically scrolling area with the app's thin scrollbar, which shows only while
+/// the area is being scrolled (or the bar itself is under the pointer).
+#[track_caller]
+pub(crate) fn scroll<'a>(content: impl Into<El<'a>>) -> scrollable::Scrollable<'a, Message> {
+    use std::hash::{Hash, Hasher};
+    // Each place in the code that makes a scroll area is one area.
+    let at = std::panic::Location::caller();
+    let mut h = std::hash::DefaultHasher::new();
+    (at.file(), at.line(), at.column()).hash(&mut h);
+    let area = h.finish().max(1);
+    let bar = scrollable::Scrollbar::new().width(SCROLLBAR_W).scroller_width(SCROLLBAR_W).margin(SCROLLBAR_MARGIN);
+    scrollable(content).direction(scrollable::Direction::Vertical(bar)).on_scroll(move |_| Message::Scrolled(area)).style(move |t, st| scroll_style(t, st, area))
+}
+
+fn scroll_style(theme: &Theme, status: scrollable::Status, area: u64) -> scrollable::Style {
     let hot = matches!(
         status,
         scrollable::Status::Hovered { is_vertical_scrollbar_hovered: true, .. } | scrollable::Status::Dragged { is_vertical_scrollbar_dragged: true, .. }
     );
+    let shown = if SCROLLED.load(std::sync::atomic::Ordering::Relaxed) == area { f32::from_bits(SCROLLBAR_OPACITY.load(std::sync::atomic::Ordering::Relaxed)) } else { 0.0 };
     let rail = scrollable::Rail {
         background: None,
         border: Border::default(),
         scroller: scrollable::Scroller {
-            background: Background::Color(alpha(Color::WHITE, if hot { 0.35 } else { 0.18 })),
+            background: Background::Color(alpha(Color::WHITE, if hot { SCROLLER_HOT } else { SCROLLER * shown })),
             border: Border { radius: R_PILL.into(), ..Default::default() },
         },
     };
@@ -343,14 +371,9 @@ fn divider<'a>(on_press: Message, line_right: bool, color: Color) -> El<'a> {
 }
 
 pub fn view(app: &CoShell) -> El<'_> {
-    // Toolbar across the top, then sidebar · terminal · AI panel, then the status bar.
+    // Toolbar across the top, then sidebar · terminal, then the status bar.
     // Everything but the sidebar is opaque: the window itself is see-through on macOS.
-    let mut work: Vec<El<'_>> = vec![column![tab_bar(app), body(app)].width(Length::Fill).into()];
-    if app.ai.open {
-        work.push(divider(Message::AiResizeStart, false, theme::BG_1));
-        work.push(crate::ui_ai::panel(app));
-    }
-    let work = container(row(work)).width(Length::Fill).height(Length::Fill).style(fill(theme::BG_0));
+    let work = container(column![tab_bar(app), body(app)].width(Length::Fill)).width(Length::Fill).height(Length::Fill).style(fill(theme::BG_0));
     let mut cols = row![].height(Length::Fill);
     if app.settings.sidebar_open {
         cols = cols.push(crate::ui_sidebar::sidebar(app)).push(divider(Message::SidebarResizeStart, true, theme::SIDEBAR));
@@ -440,33 +463,10 @@ pub(crate) fn modal(content: El<'_>) -> El<'_> {
 
 // ------------------------------------------------------------------ chrome
 
-pub(crate) fn status_dot(tab: &Tab) -> Color {
-    match (&tab.phase, tab.exited) {
-        (Phase::Connecting, _) => theme::WARN,
-        (Phase::Failed(_), _) | (Phase::Live(_), true) => theme::ERR,
-        (Phase::Live(_), false) if tab.is_local() => theme::TEXT_3,
-        (Phase::Live(_), false) => theme::OK,
-    }
-}
-
-/// Top bar: sidebar toggle and brand · session pill and safety lock · AI toggle and settings.
-/// What the session pill names: the server's group, else its name ("Cluster: ap-northeast-2").
-fn cluster_of(app: &CoShell, t: &Tab) -> String {
-    if t.is_local() {
-        return "local".into();
-    }
-    t.alias
-        .as_deref()
-        .and_then(|a| app.host_store.get(a))
-        .and_then(|d| d.group.clone())
-        .unwrap_or_else(|| t.display_name().to_string())
-}
-
 /// The layout buttons' pictures: a window outline with the panel's part filled while it shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LayoutIcon {
     Left,
-    Right,
 }
 
 const LAYOUT_ICON: (f32, f32) = (17.0, 15.0);
@@ -506,7 +506,6 @@ fn layout_icon<'a>(kind: LayoutIcon, on: bool, color: Color) -> El<'a> {
         let edge = Space::new().width(LAYOUT_GAP + LAYOUT_PANE + LAYOUT_GAP / 2.0);
         let content: El<'a> = match kind {
             LayoutIcon::Left => row![edge, divider].into(),
-            LayoutIcon::Right => row![Space::new().width(Length::Fill), divider, edge].into(),
         };
         return container(content)
             .width(w)
@@ -520,7 +519,6 @@ fn layout_icon<'a>(kind: LayoutIcon, on: bool, color: Color) -> El<'a> {
     }
     match kind {
         LayoutIcon::Left => outline(row![pane(LAYOUT_PANE.into(), Length::Fill, on, r(1.0, 0.0, 0.0, 1.0))].into(), w, h),
-        LayoutIcon::Right => outline(row![Space::new().width(Length::Fill), pane(LAYOUT_PANE.into(), Length::Fill, on, r(0.0, 1.0, 1.0, 0.0))].into(), w, h),
     }
 }
 
@@ -536,23 +534,12 @@ fn layout_btn<'a>(kind: LayoutIcon, on: bool, label: &'a str, msg: Message) -> E
 /// Room for macOS's window buttons, which sit on the header.
 const TRAFFIC_LIGHTS_W: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
 
-/// Top bar: session pill and safety lock · layout buttons.
+/// Top bar: the search pill and safety lock · layout button.
 fn header(app: &CoShell) -> El<'_> {
-    let (pill_dot, value) = match app.active_tab() {
-        Some(t) => (if matches!(t.phase, Phase::Live(_)) && !t.exited { theme::OK } else { status_dot(t) }, match tab_group(t) {
-            Some(g) => format!("{g} · {}", cluster_of(app, t)),
-            None => cluster_of(app, t),
-        }),
-        None => (theme::TEXT_3, "—".into()),
-    };
     let session = button(
         row![
-            dot(pill_dot, 8.0),
-            container(
-                mono(value, 11.5, theme::TEXT)
-            )
-            .clip(true)
-            .max_width(PILL_MAX_W),
+            crate::icons::tinted(&SEARCH, 12.0, theme::TEXT_2),
+            text(tr("서버 검색 · 명령")).size(11.5).color(theme::TEXT_2).wrapping(text::Wrapping::None),
             container(mono("⌘K", 10.0, theme::TEXT_3)).padding([1, 5]).style(|_| container::Style {
                 background: Some(Background::Color(alpha(Color::WHITE, 0.06))),
                 border: Border { radius: 5.0.into(), ..Default::default() },
@@ -604,13 +591,11 @@ fn header(app: &CoShell) -> El<'_> {
         center = center.push(tip(guard, tr("운영 서버 위험 명령어 실행 보호 모드"), tooltip::Position::Bottom));
     }
 
-    // The AI panel has no other way back in from the header once closed.
-    let (side, ai) = (app.settings.sidebar_open, app.ai.open);
+    let side = app.settings.sidebar_open;
     let left = layout_btn(LayoutIcon::Left, side, if side { tr("서버 사이드바 숨기기 (⌘B)") } else { tr("서버 사이드바 보기 (⌘B)") }, Message::SidebarToggle);
-    let right = layout_btn(LayoutIcon::Right, ai, if ai { tr("AI 패널 닫기 (⌘L)") } else { tr("AI 패널 열기 (⌘L)") }, Message::AiToggle);
 
     let bar = stack![
-        container(row![left, Space::new().width(Length::Fill), right].align_y(Alignment::Center))
+        container(row![left].align_y(Alignment::Center))
             .padding(Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 12.0 + TRAFFIC_LIGHTS_W })
             .width(Length::Fill)
             .height(HEADER_H - 1.0)
@@ -758,7 +743,7 @@ fn tab_bar(app: &CoShell) -> El<'_> {
     let tools = row![
         tip(diagnose, tr("현재 서버 AI 자동 진단"), tooltip::Position::Bottom),
         tool(&SEARCH, tr("터미널 출력 검색 (⌘F)"), Message::Shortcut(crate::app::Shortcut::Find)),
-        tool(&TRASH, tr("터미널 화면 지우기 (clear)"), Message::TermClear),
+        tool(&ERASER, tr("터미널 화면 지우기 (clear)"), Message::TermClear),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
@@ -890,6 +875,10 @@ fn body(app: &CoShell) -> El<'_> {
                 return stack![term, opaque(crate::ui_term::view(app, tab, screen))].into();
             }
             let mut layers = vec![term];
+            // No block view (a full-screen program has the terminal): the chat still opens over it.
+            if let Some((_, q)) = app.ask.as_ref().filter(|(id, _)| *id == tab.id) {
+                layers.push(crate::ui_term::chat_overlay(app, tab, q));
+            }
             if tab.exited {
                 layers.push(exited_banner(tab));
             }

@@ -1,27 +1,26 @@
-//! AI panel and AI settings dialog.
+//! The AI conversation (shown on the chat sheet over the terminal) and the AI settings dialog.
 
 use crate::i18n::{tf, tr};
 use coshell_ai::profile::KeySource;
 use coshell_ai::{AuthStyle, Format, Role, chat_url, models_url};
-use iced::keyboard::key::Named;
 use iced::widget::text::Span;
-use iced::widget::text_editor::{self, Binding, KeyPress};
+use iced::widget::text_editor;
 use iced::widget::{Space, button, column, container, pick_list, rich_text, row, span, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
-use crate::ai::{AI_INPUT, Chat, Exec, ExecState, Settings, Turn};
+use crate::ai::{Exec, ExecState, Settings, Turn};
 use crate::app::{CoShell, Message, Phase, Tab, TabId};
 use crate::assist::{self, Risk, Segment};
 use crate::theme::{self, alpha};
-use crate::icons::{CHECK, CHEVRON_DOWN, CHEVRON_RIGHT, COPY, PAPERCLIP, PENCIL, PLUS, SEND, STOP, X, ZAP};
+use crate::icons::{CHECK, CHEVRON_DOWN, CHEVRON_RIGHT, COPY, PAPERCLIP, PENCIL, PLUS, X, ZAP};
 use crate::ui_status::Mark;
-use crate::ui::{BAR_H, Btn, El, Face, SEMIBOLD, btn, icon_btn, input_style, kbd, mono, muted, rule, tip};
+use crate::ui::{Btn, El, Face, SEMIBOLD, btn, icon_btn, input_style, mono, muted, tip};
 
 /// The first code block's run button (tests click it by this id).
 pub const RUN_BTN: &str = "ai-run";
 
-const COMPOSER_H: f32 = 42.0;
-const COMPOSER_R: f32 = 12.0;
+/// The AI settings form's label column.
+const AI_LABEL_W: f32 = 70.0;
 /// Height of the multi-line fields in the AI advanced settings.
 const ADV_EDITOR_H: f32 = 64.0;
 /// Output of a command the assistant ran scrolls beyond this.
@@ -46,14 +45,6 @@ impl std::fmt::Display for FormatChoice {
     }
 }
 
-fn panel_style(_: &iced::Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(theme::BG_1)),
-        text_color: Some(theme::TEXT),
-        ..Default::default()
-    }
-}
-
 /// What the assistant is told it is looking at.
 /// Title length passed on (it is set by the remote shell, so it is kept short and plain).
 const TITLE_MAX: usize = 80;
@@ -74,35 +65,13 @@ pub fn target_label(tab: &Tab) -> String {
     label
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TabChoice {
-    id: TabId,
-    label: String,
-}
-impl std::fmt::Display for TabChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
-    }
-}
-
-fn tab_choice(t: &Tab) -> TabChoice {
-    let label = match t.env {
-        crate::hosts::Env::None if t.is_local() => format!("{} · {}", tr("로컬"), t.display_name()),
-        crate::hosts::Env::None => t.display_name().to_string(),
-        env => format!("{} · {}", env.label(), t.display_name()),
-    };
-    TabChoice { id: t.id, label }
-}
-
-
-pub fn panel(app: &CoShell) -> El<'_> {
-    let tab = app.active_tab();
+/// The profile in use, as a small badge that opens the list of profiles.
+fn profile_pick(app: &CoShell) -> El<'_> {
     let ai = &app.ai;
     let active = ai.active();
     let choices: Vec<ProfileChoice> =
         ai.store.profiles.iter().map(|p| ProfileChoice { id: p.id.clone(), name: p.name.clone() }).collect();
     let selected = choices.iter().find(|c| c.id == active.id).cloned();
-    // The design's provider badge; still a drop-down to switch profiles.
     let profile = pick_list(choices, selected, |c: ProfileChoice| Message::AiProfile(c.id))
         .text_size(10)
         .font(crate::fonts::MONO)
@@ -116,56 +85,50 @@ pub fn panel(app: &CoShell) -> El<'_> {
             border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_PILL.into() },
         })
         .menu_style(crate::ui::menu_style);
-    let mut header = row![
-        text(tr("AI 채팅")).size(12).font(SEMIBOLD).color(theme::SLATE_100).wrapping(text::Wrapping::None),
-        tip(profile, tf("모델: {0}", &[&active.model]), iced::widget::tooltip::Position::Bottom),
-        Space::new().width(Length::Fill),
-    ]
+    tip(profile, tf("모델: {0}", &[&active.model]), iced::widget::tooltip::Position::Top)
+}
+
+/// The chat sheet's tools, under the conversation: what the assistant may read
+/// (the terminal itself, an attached piece of output) and which profile answers.
+pub(crate) fn sheet_tools<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
+    let id = tab.id;
+    // "Context link": the assistant reads the terminal itself (runs read-only commands and sees their output).
+    let context = iced::widget::checkbox(app.settings.ai_agent)
+        .label(tr("컨텍스트 연동"))
+        .on_toggle(|_| Message::AiAutoRun)
+        .size(12)
+        .spacing(6)
+        .text_size(11)
+        .style(|_, st| {
+            let on = matches!(st, iced::widget::checkbox::Status::Active { is_checked: true } | iced::widget::checkbox::Status::Hovered { is_checked: true });
+            iced::widget::checkbox::Style {
+                background: Background::Color(if on { theme::ACCENT } else { theme::BG_0 }),
+                icon_color: theme::ON_ACCENT,
+                border: Border { color: if on { theme::ACCENT } else { theme::LINE_2 }, width: 1.0, radius: 3.0.into() },
+                text_color: Some(theme::TEXT_2),
+            }
+        });
+    let mut tools = row![tip(
+        context,
+        tr("켜면 AI가 조회 명령을 직접 실행하고 결과를 읽어 답합니다 (변경·위험 명령은 ▶로 직접)"),
+        iced::widget::tooltip::Position::Top
+    )]
     .spacing(8)
     .align_y(Alignment::Center);
-    if let Some(t) = tab {
-        let sessions: Vec<TabChoice> = app.tabs.iter().map(tab_choice).collect();
-        let dot_color = if t.env == crate::hosts::Env::Prod { theme::WARN } else { theme::OK };
-        let select = pick_list(sessions, Some(tab_choice(t)), |c: TabChoice| Message::Activate(c.id))
-            .text_size(12)
-            .font(crate::ui::MEDIUM)
-            .padding(Padding { top: 4.0, right: 8.0, bottom: 4.0, left: 22.0 })
-            .handle(pick_list::Handle::Static(pick_list::Icon {
-                font: crate::fonts::SANS,
-                code_point: '⌄',
-                size: Some(12.into()),
-                line_height: text::LineHeight::default(),
-                shaping: text::Shaping::Advanced,
-            }))
-            .style(|_, st| pick_list::Style {
-                text_color: theme::TEXT,
-                placeholder_color: theme::TEXT_3,
-                handle_color: theme::TEXT_2,
-                background: Background::Color(if matches!(st, pick_list::Status::Hovered | pick_list::Status::Opened { .. }) { theme::BG_3 } else { theme::BG_2 }),
-                border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_CONTROL.into() },
-            })
-            .menu_style(crate::ui::menu_style);
-        let select = iced::widget::stack![
-            select,
-            container(crate::ui::dot(dot_color, 8.0)).padding(Padding::ZERO.left(10.0)).center_y(Length::Fill),
-        ];
-        header = header.push(container(select).max_width(200.0));
-    }
-
-    let body: El<'_> = match tab {
-        None => container(muted(tr("세션을 열면 해당 서버를 기준으로 답합니다"))).center(Length::Fill).into(),
-        Some(t) => conversation(t, app.prod_guard, app.face, app.fold),
-    };
-    let composer: El<'_> = match tab {
-        Some(t) => composer(app, t),
-        None => Space::new().into(),
-    };
-    let header = container(header).padding(Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 16.0 }).height(BAR_H - 1.0).center_y(BAR_H - 1.0).clip(true);
-    container(column![header, rule(true), body, composer].height(Length::Fill))
-        .width(app.settings.ai_panel_width)
-        .height(Length::Fill)
-        .style(panel_style)
-        .into()
+    tools = tools.push(match &tab.chat.attachment {
+        Some(a) => {
+            let masked = if a.secrets > 0 { tf(" · 마스킹 {0}", &[&a.secrets]) } else { String::new() };
+            row![
+                chip(format!("{}{masked}", a.label)),
+                button(crate::icons::tinted(&X, 11.0, theme::TEXT_3)).padding(3).style(crate::ui::btn_style(Btn::Ghost)).on_press(Message::AiDetach(id)),
+            ]
+            .align_y(Alignment::Center)
+            .into()
+        }
+        None => icon_btn(&PAPERCLIP, tr("터미널 출력을 AI 질문에 첨부"), Btn::Ghost, Some(Message::AiAttach(id))),
+    });
+    tools = tools.push(Space::new().width(Length::Fill)).push(profile_pick(app));
+    container(tools).padding(Padding { top: 6.0, right: 14.0, bottom: 6.0, left: 16.0 }).into()
 }
 
 /// Height of the assistant's face beside its replies.
@@ -199,11 +162,23 @@ const RAIL_W: f32 = crate::ui_status::DISC;
 const MARK_Y: f32 = 20.0;
 const MARK_Y_LABEL: f32 = 8.0;
 
+/// Widest the welcome's suggestions get in the chat sheet.
+const SHEET_WELCOME_W: f32 = 420.0;
+
+/// The chat sheet's conversation: as tall as what was said, up to `max_height`.
 /// `face`: the welcome's expression; `fold`: seconds into the working reply's fold cycle.
-fn conversation(tab: &Tab, guard: bool, face: Face, fold: f32) -> El<'_> {
+pub(crate) fn sheet_conversation(tab: &Tab, guard: bool, face: Face, fold: f32, max_height: f32) -> El<'_> {
+    match turns(tab, guard, fold) {
+        Some(col) => container(crate::ui::scroll(col).anchor_bottom()).max_height(max_height).into(),
+        None => container(container(welcome(tab, face.idle())).max_width(SHEET_WELCOME_W)).center_x(Length::Fill).into(),
+    }
+}
+
+/// The turns so far, or `None` before the first question.
+fn turns(tab: &Tab, guard: bool, fold: f32) -> Option<iced::widget::Column<'_, Message>> {
     let chat = &tab.chat;
     if chat.turns.is_empty() && chat.error.is_none() {
-        return welcome(tab, face.idle());
+        return None;
     }
     // A command result fed back to the model is hidden: it shows on the command itself.
     let shown: Vec<usize> = (0..chat.turns.len()).filter(|&i| !chat.turns[i].hidden).collect();
@@ -232,7 +207,7 @@ fn conversation(tab: &Tab, guard: bool, face: Face, fold: f32) -> El<'_> {
     if let Some(e) = &chat.error {
         col = col.push(error_card(tab.id, e));
     }
-    crate::ui::scroll(col).anchor_bottom().height(Length::Fill).into()
+    Some(col)
 }
 
 /// A reply's status mark, and whether a line joins it to the reply before / after it.
@@ -306,7 +281,7 @@ fn welcome(tab: &Tab, face: Face) -> El<'_> {
         );
         col = col.push(Space::new().height(2));
     }
-    container(col).padding(16).center(Length::Fill).into()
+    container(col).padding(16).into()
 }
 
 /// An attachment's label, marked with a paperclip.
@@ -767,109 +742,6 @@ fn error_card<'a>(id: TabId, e: &'a str) -> El<'a> {
 }
 
 /// One card: optional attachment, the text box, then `Return ↵ 전송 · ☑ 컨텍스트 연동 · send`.
-fn composer<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
-    let id = tab.id;
-    let chat: &Chat = &tab.chat;
-    let mut card = column![].spacing(10);
-    if let Some(a) = &chat.attachment {
-        let masked = if a.secrets > 0 { tf(" · 마스킹 {0}", &[&a.secrets]) } else { String::new() };
-        card = card.push(
-            row![
-                chip(format!("{}{masked}", a.label)),
-                button(crate::icons::tinted(&X, 11.0, theme::TEXT_3)).padding(3).style(crate::ui::btn_style(Btn::Ghost)).on_press(Message::AiDetach(id)),
-            ]
-            .align_y(Alignment::Center),
-        );
-    }
-    let editor = iced::widget::text_editor(&chat.draft)
-        .id(AI_INPUT)
-        .placeholder(if app.composing { "" } else { tr("AI에게 메시지 보내기") })
-        .on_action(move |a| Message::AiDraft(id, a))
-        .key_binding(move |kp: KeyPress| {
-            let focused = matches!(kp.status, text_editor::Status::Focused { .. });
-            if focused && kp.key == iced::keyboard::Key::Named(Named::Enter) && !kp.modifiers.shift() {
-                Some(Binding::Custom(Message::AiSend(id)))
-            } else {
-                Binding::from_key_press(kp)
-            }
-        })
-        .height(COMPOSER_H)
-        .size(13)
-        .line_height(1.625)
-        .padding(0)
-        .style(|_, _| text_editor::Style {
-            background: Background::Color(Color::TRANSPARENT),
-            border: Border::default(),
-            placeholder: theme::TEXT_3,
-            value: theme::SLATE_100,
-            selection: alpha(theme::ACCENT, 0.35),
-        });
-
-    let empty = chat.draft.text().trim().is_empty();
-    let action: El<'a> = if chat.is_streaming() {
-        icon_btn(&STOP, tr("중지"), Btn::Plain, Some(Message::AiStop(id)))
-    } else {
-        let send = button(container(crate::icons::tinted(&SEND, 14.0, theme::ON_ACCENT)).center(28))
-            .padding(0)
-            .on_press_maybe((!empty).then_some(Message::AiSend(id)))
-            .style(|_, st| {
-                let (bg, shadow) = match st {
-                    button::Status::Disabled => (alpha(theme::ACCENT, 0.4), Color::TRANSPARENT),
-                    button::Status::Hovered | button::Status::Pressed => (theme::ACCENT_TX, alpha(theme::ACCENT, 0.2)),
-                    _ => (theme::ACCENT, alpha(theme::ACCENT, 0.2)),
-                };
-                button::Style {
-                    background: Some(Background::Color(bg)),
-                    border: Border { radius: crate::ui::R_CONTROL.into(), ..Default::default() },
-                    shadow: iced::Shadow { color: shadow, offset: iced::Vector::new(0.0, 4.0), blur_radius: 6.0 },
-                    ..Default::default()
-                }
-            });
-        tip(send, tr("전송"), iced::widget::tooltip::Position::Top)
-    };
-    // "Context link": the assistant reads the terminal itself (runs read-only commands and sees their output).
-    let context = iced::widget::checkbox(app.settings.ai_agent)
-        .label(tr("컨텍스트 연동"))
-        .on_toggle(|_| Message::AiAutoRun)
-        .size(12)
-        .spacing(6)
-        .text_size(11)
-        .style(|_, st| {
-            let on = matches!(st, iced::widget::checkbox::Status::Active { is_checked: true } | iced::widget::checkbox::Status::Hovered { is_checked: true });
-            iced::widget::checkbox::Style {
-                background: Background::Color(if on { theme::ACCENT } else { theme::BG_0 }),
-                icon_color: theme::ON_ACCENT,
-                border: Border { color: if on { theme::ACCENT } else { theme::LINE_2 }, width: 1.0, radius: 3.0.into() },
-                text_color: Some(theme::TEXT_2),
-            }
-        });
-    let toolbar = row![
-        kbd("Return ↵"),
-        text(tr("전송")).size(11).color(theme::TEXT_3),
-        Space::new().width(6),
-        tip(
-            context,
-            tr("켜면 AI가 조회 명령을 직접 실행하고 결과를 읽어 답합니다 (변경·위험 명령은 ▶로 직접)"),
-            iced::widget::tooltip::Position::Top
-        ),
-        Space::new().width(Length::Fill),
-        action,
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    card = card.push(editor).push(toolbar);
-    let card = container(card).padding(12).style(|_| container::Style {
-        background: Some(Background::Color(theme::BG_2)),
-        border: Border { color: theme::LINE, width: 1.0, radius: COMPOSER_R.into() },
-        ..Default::default()
-    });
-    column![
-        container(Space::new()).height(1).width(Length::Fill).style(crate::ui::fill(alpha(theme::LINE, 0.5))),
-        container(card).padding(Padding { top: 4.0, right: 14.0, bottom: 14.0, left: 14.0 }),
-    ]
-    .into()
-}
-
 // ------------------------------------------------------------------ settings
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1003,6 +875,16 @@ fn key_status_text(s: &Settings) -> (String, Color) {
 }
 
 /// The AI page of the settings dialog. Saved with the dialog's own Save button.
+/// A row of the AI form: a label against its control, as in the other dialogs.
+fn field<'a>(label: &str, control: El<'a>) -> El<'a> {
+    crate::form::field(AI_LABEL_W, label, control)
+}
+
+/// Something under a control of the AI form (a note, a status line).
+fn note<'a>(content: El<'a>) -> El<'a> {
+    crate::form::under(AI_LABEL_W, content)
+}
+
 pub fn settings_page(s: &Settings) -> El<'_> {
     let p = s.profile();
     let list = s.draft.profiles.iter().enumerate().fold(column![muted(tr("AI 프로필"))].spacing(4), |col, (i, prof)| {
@@ -1034,7 +916,6 @@ pub fn settings_page(s: &Settings) -> El<'_> {
     });
     let list = list.push(crate::ui::icon_text_btn(&PLUS, tr("프로필 추가"), Btn::Ghost, Some(Message::AiSettingsAdd)));
 
-    let label = |t: &str| text(t.to_string()).size(11.5).color(theme::TEXT_2);
     let (key_text, key_color) = key_status_text(s);
     let formats = [FormatChoice(Format::Anthropic), FormatChoice(Format::OpenAi)];
     let mut model_row = row![
@@ -1052,20 +933,27 @@ pub fn settings_page(s: &Settings) -> El<'_> {
         None => Space::new().into(),
     };
     let form = column![
-        label(tr("이름")),
-        text_input("", &p.name).on_input(Message::AiSettingsName).size(12.5).padding([6, 10]).style(input_style),
-        label(tr("API 형식")),
-        pick_list(formats, Some(FormatChoice(p.format)), |f: FormatChoice| Message::AiSettingsFormat(f.0)).text_size(12).padding([5, 8]).style(crate::ui::pick_style).menu_style(crate::ui::menu_style),
-        muted(match p.format {
+        field(tr("이름"), text_input("", &p.name).on_input(Message::AiSettingsName).size(12.5).padding([6, 10]).style(input_style).into()),
+        field(
+            tr("API 형식"),
+            pick_list(formats, Some(FormatChoice(p.format)), |f: FormatChoice| Message::AiSettingsFormat(f.0))
+                .text_size(12)
+                .padding([6, 10])
+                .width(Length::Fill)
+                .style(crate::ui::pick_style)
+                .menu_style(crate::ui::menu_style)
+                .into()
+        ),
+        note(muted(match p.format {
             Format::Anthropic => tr("Claude와 Anthropic 호환 서버 (DeepSeek, 프록시 등)"),
             Format::OpenAi => tr("OpenAI, Ollama, vLLM, LiteLLM, OpenRouter, Azure 등 호환 서버"),
-        }),
-        label("Base URL"),
-        text_input(p.format.default_base(), &p.base_url).on_input(Message::AiSettingsBase).font(crate::fonts::MONO).size(12).padding([6, 10]).style(input_style),
-        mono(format!("POST {}", chat_url(p)), 10.5, theme::TEXT_3),
-        label(tr("API 키")),
-        text(key_text).size(11.5).color(key_color),
-        row![
+        })),
+        field(
+            "Base URL",
+            text_input(p.format.default_base(), &p.base_url).on_input(Message::AiSettingsBase).font(crate::fonts::MONO).size(12).padding([6, 10]).style(input_style).into()
+        ),
+        note(mono(format!("POST {}", chat_url(p)), 10.5, theme::TEXT_3)),
+        field(tr("API 키"), row![
             text_input(tr("새 키 입력 (화면에 다시 표시되지 않음)"), s.key_input.as_str())
                 .on_input(Message::AiSettingsKey)
                 .on_submit(Message::AiSettingsSaveKey)
@@ -1077,16 +965,20 @@ pub fn settings_page(s: &Settings) -> El<'_> {
             btn(tr("키 저장"), Btn::Plain, (!s.key_input.is_empty()).then_some(Message::AiSettingsSaveKey)),
             btn(tr("키 삭제"), Btn::Ghost, (s.key_status.get(s.selected) == Some(&KeySource::Keychain)).then_some(Message::AiSettingsDeleteKey)),
         ]
-        .spacing(8),
-        label(tr("모델")),
-        model_row,
-        row![btn(tr("연결 테스트"), Btn::Plain, (!s.busy).then_some(Message::AiSettingsFetch(true))), status]
-            .spacing(10)
-            .align_y(Alignment::Center),
+        .spacing(8)
+        .into()),
+        note(text(key_text).size(11.5).color(key_color).into()),
+        field(tr("모델"), model_row.into()),
+        note(
+            row![btn(tr("연결 테스트"), Btn::Plain, (!s.busy).then_some(Message::AiSettingsFetch(true))), status]
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .into()
+        ),
         Space::new().height(4),
         advanced(s),
     ]
-    .spacing(6);
+    .spacing(8);
 
     let actions = row![
         btn(tr("이 프로필 사용"), Btn::Ghost, (p.id != s.draft.active).then_some(Message::AiSettingsUse)),

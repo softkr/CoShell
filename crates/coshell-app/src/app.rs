@@ -16,7 +16,7 @@ use iced::keyboard::{self, key::Named};
 use iced::{Event, Subscription, Task, event, window};
 use zeroize::Zeroizing;
 
-use crate::ai::{AI_INPUT, Ai, Attachment, Chat, Exec, ExecState, Turn};
+use crate::ai::{Ai, Attachment, Chat, Exec, ExecState, Turn};
 use crate::settings::{self, CursorKind, Scheme, Settings};
 use crate::assist;
 use crate::conn::{self, Answers, ConnEvent, Once};
@@ -71,6 +71,12 @@ const GLANCE: [i8; 4] = [0, 1, 0, -1];
 /// Frame interval of the chat's animated status mark (a timer: it must run on its own,
 /// whether or not anything else makes the window redraw).
 const FOLD_TICK: Duration = Duration::from_millis(16);
+/// How long a scrollbar stays after its area last moved, how often that is checked,
+/// and how long it then takes to fade away (one step per frame).
+const SCROLLBAR_LINGER: Duration = Duration::from_millis(900);
+const SCROLLBAR_TICK: Duration = Duration::from_millis(100);
+const SCROLLBAR_FADE: Duration = Duration::from_millis(350);
+const SCROLLBAR_FADE_TICK: Duration = Duration::from_millis(16);
 /// A longer pause between frames means the fold stopped: start it over from flat.
 const FOLD_RESTART: Duration = Duration::from_millis(250);
 pub fn prompt_input_id(i: usize) -> String {
@@ -224,6 +230,8 @@ pub struct Tab {
     pub stats: Option<crate::metrics::Stats>,
     /// Remote files (SFTP), opened when the file panel is first shown for this tab.
     pub files: crate::files::Files,
+    /// The git branch of the folder the prompt is in, for the prompt's segments.
+    pub git: crate::branch::State,
 }
 
 impl Tab {
@@ -276,6 +284,8 @@ pub struct Palette {
 /// Settings dialog (⌘,): an edited copy, applied on save.
 pub struct SettingsDraft {
     pub tab: SettingsTab,
+    /// The terminal page's tab.
+    pub term_tab: TermTab,
     pub s: Settings,
     pub scrollback: String,
     pub attach_lines: String,
@@ -287,9 +297,21 @@ pub struct SettingsDraft {
 pub enum SettingsTab {
     #[default]
     General,
+    Shortcuts,
+    Terminal,
     Servers,
     Keys,
     Ai,
+}
+
+/// Tabs of the settings dialog's terminal page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TermTab {
+    #[default]
+    Text,
+    Colors,
+    Scrolling,
+    Compatibility,
 }
 
 /// The snippet editor: a new snippet, or the one at `index`.
@@ -342,6 +364,13 @@ fn cursor_shape(kind: CursorKind) -> coshell_term::alacritty_terminal::vte::ansi
 }
 
 /// A whole number within `min..=max`.
+/// `v` moved one `step` up (`dir` > 0) or down, kept within `min..=max`; what is not a number starts from `default`.
+fn step_number(v: &str, dir: i8, step: usize, min: usize, max: usize, default: usize) -> String {
+    let n = v.trim().parse::<usize>().unwrap_or(default);
+    let n = if dir > 0 { n.saturating_add(step) } else { n.saturating_sub(step) };
+    n.clamp(min, max).to_string()
+}
+
 fn number_in(label: &str, v: &str, min: usize, max: usize) -> Result<usize, String> {
     v.trim().parse::<usize>().ok().filter(|n| (min..=max).contains(n)).ok_or_else(|| tf("{0}: {1}–{2} 사이의 숫자를 입력하세요", &[&label, &min, &max]))
 }
@@ -447,13 +476,14 @@ pub struct CoShell {
     /// Seconds into the chat's fold cycle ([`crate::ui_status`]), and when it began / last moved.
     pub fold: f32,
     fold_clock: Option<(std::time::Instant, std::time::Instant)>,
+    /// When a scroll area last moved, while its scrollbar is showing.
+    scrolled_at: Option<std::time::Instant>,
 }
 
 /// A draggable divider between panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Divider {
     Sidebar,
-    Ai,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -549,7 +579,6 @@ pub enum Message {
     TabRenameCommit,
     TabRenameCancel,
     NoticeDismiss,
-    AiResizeStart,
     SidebarResizeStart,
     /// Cursor x while dragging a divider.
     AiResizeTo(f32),
@@ -593,6 +622,14 @@ pub enum Message {
     FaceGlance,
     /// Next frame of the chat's folding status mark.
     FoldTick,
+    /// This scroll area ([`crate::ui::scroll`]) moved: show its scrollbar for a moment.
+    Scrolled(u64),
+    /// Hide the scrollbar once scrolling has stopped.
+    ScrollbarTick,
+    /// Look whether the active tab's prompt moved to another folder or finished a command.
+    BranchTick,
+    /// The branch found for the folder asked about (`None`: not a repository, or not found out).
+    BranchFound(TabId, crate::branch::Key, Option<String>),
     /// The pointer is over this block (its actions show).
     BlockHover(Option<usize>),
     /// Ask the AI about one block: (tab, command, output).
@@ -648,6 +685,10 @@ pub enum Message {
     SettingsCursor(CursorKind),
     SettingsScrollback(String),
     SettingsAttachLines(String),
+    /// −1 / +1 on a number's stepper.
+    SettingsScrollbackStep(i8),
+    SettingsAttachLinesStep(i8),
+    SettingsTermTab(TermTab),
     SettingsOptionMeta(bool),
     SettingsUpdateCheck(bool),
     UpdateCheck,
@@ -712,8 +753,6 @@ pub enum Message {
     AiToggle,
     About,
     AiProfile(String),
-    AiDraft(TabId, text_editor::Action),
-    AiSend(TabId),
     AiStop(TabId),
     AiEvent(TabId, Result<StreamEvent, AiError>),
     AiAttach(TabId),
@@ -830,8 +869,6 @@ impl CoShell {
             Arc::new(Keychain(PASSWORD_SERVICE)),
         );
         app.notice = (!warnings.is_empty()).then(|| warnings.join(" · "));
-        // The AI panel starts closed: ⌘L, the header button or asking from the terminal opens it.
-        app.ai.open = false;
         app.settings = prefs;
         app.settings_path = settings_path;
         app.apply_settings();
@@ -915,6 +952,7 @@ impl CoShell {
             glance_step: 0,
             fold: 0.0,
             fold_clock: None,
+            scrolled_at: None,
             block_hover: None,
             ask: None,
             ask_joined: false,
@@ -966,6 +1004,18 @@ impl CoShell {
     }
 
     /// An SSH tab stuck before connecting, with a route (tests).
+    /// Whether a scrollbar is showing (tests).
+    #[cfg(test)]
+    pub fn scrollbar_shown(&self) -> bool {
+        self.scrolled_at.is_some()
+    }
+
+    /// Pretend the last scroll was `by` longer ago (tests).
+    #[cfg(test)]
+    pub fn rewind_scroll(&mut self, by: Duration) {
+        self.scrolled_at = self.scrolled_at.and_then(|at| at.checked_sub(by));
+    }
+
     #[cfg(test)]
     pub fn open_fake_ssh(&mut self, name: &str, route: &[&str], latencies_ms: &[u64]) -> TabId {
         let id = self.alloc_id();
@@ -988,6 +1038,7 @@ impl CoShell {
             auto_forwards: Vec::new(),
             save_passwords: Vec::new(),
             metas: Vec::new(),
+            git: Default::default(),
             sig: None,
             stats: None,
             files: crate::files::Files::default(),
@@ -1158,6 +1209,7 @@ impl CoShell {
         self.ai.settings = None;
         self.settings_draft = Some(SettingsDraft {
             tab: SettingsTab::General,
+            term_tab: TermTab::default(),
             s: self.settings.clone(),
             scrollback: self.settings.scrollback.to_string(),
             attach_lines: self.settings.ai_attach_lines.to_string(),
@@ -1279,11 +1331,17 @@ impl CoShell {
             d.tab = SettingsTab::Ai;
             return;
         }
-        let parsed = number_in(tr("스크롤백 줄 수"), &d.scrollback, settings::SCROLLBACK_MIN, settings::SCROLLBACK_MAX).and_then(|sb| {
-            number_in(tr("AI 첨부 줄 수"), &d.attach_lines, settings::ATTACH_LINES_MIN, settings::ATTACH_LINES_MAX).map(|al| (sb, al))
-        });
-        let (scrollback, attach_lines) = match parsed {
-            Ok(v) => v,
+        // A bad number: shown with the page (and tab) it is on.
+        let scrollback = match number_in(tr("스크롤백 줄 수"), &d.scrollback, settings::SCROLLBACK_MIN, settings::SCROLLBACK_MAX) {
+            Ok(n) => n,
+            Err(e) => {
+                d.error = Some(e);
+                (d.tab, d.term_tab) = (SettingsTab::Terminal, TermTab::Scrolling);
+                return;
+            }
+        };
+        let attach_lines = match number_in(tr("AI 첨부 줄 수"), &d.attach_lines, settings::ATTACH_LINES_MIN, settings::ATTACH_LINES_MAX) {
+            Ok(n) => n,
             Err(e) => {
                 d.error = Some(e);
                 d.tab = SettingsTab::General;
@@ -1295,7 +1353,6 @@ impl CoShell {
             scrollback,
             ai_attach_lines: attach_lines,
             window: self.settings.window,
-            ai_panel_open: self.settings.ai_panel_open,
             ai_agent: self.settings.ai_agent,
             ..d.s.clone()
         };
@@ -1321,6 +1378,14 @@ impl CoShell {
             Message::SettingsCursor(v) => d.s.cursor = v,
             Message::SettingsScrollback(v) => d.scrollback = v,
             Message::SettingsAttachLines(v) => d.attach_lines = v,
+            Message::SettingsScrollbackStep(dir) => {
+                d.scrollback = step_number(&d.scrollback, dir, settings::SCROLLBACK_STEP, settings::SCROLLBACK_MIN, settings::SCROLLBACK_MAX, settings::SCROLLBACK_DEFAULT)
+            }
+            Message::SettingsAttachLinesStep(dir) => {
+                d.attach_lines =
+                    step_number(&d.attach_lines, dir, settings::ATTACH_LINES_STEP, settings::ATTACH_LINES_MIN, settings::ATTACH_LINES_MAX, settings::ATTACH_LINES_DEFAULT)
+            }
+            Message::SettingsTermTab(t) => d.term_tab = t,
             Message::SettingsOptionMeta(v) => d.s.option_as_meta = v,
             Message::SettingsUpdateCheck(v) => d.s.update_check = v,
             _ => {}
@@ -1392,20 +1457,55 @@ impl CoShell {
         iced::widget::operation::focus(ASK_INPUT)
     }
 
-    /// Ask the AI from the terminal: opens the panel if needed.
-    fn ask_from_terminal(&mut self, id: TabId, q: String) -> Task<Message> {
-        if !self.ai.open {
-            self.ai.open = true;
-            self.settings.ai_panel_open = true;
-            self.state_dirty = true;
+    /// Ask for the active tab's git branch when its prompt shows another folder, or a command
+    /// has run since the last look (it may have switched branches).
+    fn branch_tick(&mut self) -> Task<Message> {
+        let Some(tab) = self.live_tab() else { return Task::none() };
+        let Some((prompt, _)) = self.screen_of(tab).and_then(|s| s.current) else { return Task::none() };
+        // A prompt that names no folder has no segments to fill.
+        if prompt.sym.is_empty() {
+            return Task::none();
         }
-        self.notice = Some(tr("터미널에서 AI에게 질문을 전달했습니다").into());
-        self.update(Message::AiSuggest(id, q, false))
+        let key = (prompt.cwd.clone(), tab.metas.len());
+        if tab.git.asked.as_ref() == Some(&key) {
+            return Task::none();
+        }
+        let (id, conn, cwd) = (tab.id, tab.conn.clone(), prompt.cwd);
+        let local_dir = tab.is_local().then(|| crate::files::prompt_dir(&cwd, &self.home.to_string_lossy())).flatten();
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
+        // Another folder: the old branch is not this folder's. The same folder: it stays until the answer.
+        if tab.git.asked.as_ref().is_none_or(|(old, _)| *old != cwd) {
+            tab.git.branch = None;
+        }
+        tab.git.asked = Some(key.clone());
+        let found = move |branch| Message::BranchFound(id, key, branch);
+        match (conn, local_dir) {
+            (Some(conn), _) => Task::perform(
+                async move {
+                    let out = tokio::time::timeout(crate::branch::TIMEOUT, conn.exec(crate::branch::SCRIPT, crate::branch::LIMIT)).await.ok()?.ok()?;
+                    crate::branch::remote(&cwd, &String::from_utf8_lossy(&out.output))
+                },
+                found,
+            ),
+            (None, Some(dir)) => Task::perform(crate::branch::local(dir.into()), found),
+            (None, None) => Task::none(),
+        }
     }
 
-    fn focus_ai(&mut self) -> Task<Message> {
-        self.term_focus = (self.term_focus.0 + 1, false);
-        iced::widget::operation::focus(AI_INPUT)
+    /// Show the conversation for `id`: the chat sheet over its terminal, with the dock in
+    /// question mode. What is already typed there stays.
+    fn open_chat(&mut self, id: TabId) -> Task<Message> {
+        if !self.ask.as_ref().is_some_and(|(t, _)| *t == id) {
+            self.ask = Some((id, "#".into()));
+            self.ask_joined = false;
+        }
+        self.focus_ask()
+    }
+
+    /// Ask the AI from the terminal; the answer shows on the chat sheet.
+    fn ask_from_terminal(&mut self, id: TabId, q: String) -> Task<Message> {
+        let focus = self.open_chat(id);
+        Task::batch([self.update(Message::AiSuggest(id, q, false)), focus])
     }
 
     /// Attach the active tab's recent output (masked) to its chat.
@@ -1436,7 +1536,7 @@ impl CoShell {
             return None;
         }
         let sig = tab.sig.as_ref()?;
-        let mut screen = crate::blocks::parse(&coshell_term::logical_lines(s.term(), crate::blocks::BLOCK_ROWS), sig);
+        let mut screen = crate::blocks::parse(&coshell_term::styled_lines(s.term(), crate::blocks::BLOCK_ROWS), sig);
         // Spaces typed at the end ("sudo ") are cut off with the line's trailing blanks;
         // the cursor still sits after them. (At an empty prompt they can't be told from
         // the prompt's own space.)
@@ -1573,6 +1673,7 @@ impl CoShell {
             auto_forwards: Vec::new(),
             save_passwords: Vec::new(),
             metas: Vec::new(),
+            git: Default::default(),
             sig: None,
             stats: None,
             files: crate::files::Files::default(),
@@ -1610,6 +1711,7 @@ impl CoShell {
             auto_forwards: forwards,
             save_passwords: Vec::new(),
             metas: Vec::new(),
+            git: Default::default(),
             sig: None,
             stats: None,
             files: crate::files::Files::default(),
@@ -1735,11 +1837,6 @@ impl CoShell {
             PaletteItem::Tunnels => self.update(Message::TunnelPanel),
             PaletteItem::AiAttach | PaletteItem::NewChat => {
                 let Some(id) = self.active else { return Task::none() };
-                if !self.ai.open {
-                    self.ai.open = true;
-                    self.settings.ai_panel_open = true;
-                    self.state_dirty = true;
-                }
                 self.update(if item == PaletteItem::AiAttach { Message::AiAttach(id) } else { Message::AiNewChat(id) })
             }
         }
@@ -1929,26 +2026,15 @@ impl CoShell {
                 self.notice = None;
                 Task::none()
             }
-            Message::AiResizeStart => {
-                self.resizing = Some(Divider::Ai);
-                Task::none()
-            }
             Message::SidebarResizeStart => {
                 self.resizing = Some(Divider::Sidebar);
                 Task::none()
             }
             Message::AiResizeTo(x) => {
                 let w = self.settings.window.width;
-                let side = if self.settings.sidebar_open { self.settings.sidebar_width } else { 0.0 };
-                let ai = if self.ai.open { self.settings.ai_panel_width } else { 0.0 };
                 match self.resizing {
-                    Some(Divider::Ai) => {
-                        let room = (w - side - TERMINAL_MIN_W).max(settings::AI_PANEL_W_MIN);
-                        let max = settings::AI_PANEL_W_MAX.min(room);
-                        self.settings.ai_panel_width = (w - x).clamp(settings::AI_PANEL_W_MIN, max);
-                    }
                     Some(Divider::Sidebar) => {
-                        let room = (w - ai - TERMINAL_MIN_W).max(settings::SIDEBAR_W_MIN);
+                        let room = (w - TERMINAL_MIN_W).max(settings::SIDEBAR_W_MIN);
                         let max = settings::SIDEBAR_W_MAX.min(room);
                         self.settings.sidebar_width = x.clamp(settings::SIDEBAR_W_MIN, max);
                     }
@@ -2056,6 +2142,32 @@ impl CoShell {
                 self.face.blink = false;
                 Task::none()
             }
+            Message::BranchTick => self.branch_tick(),
+            Message::BranchFound(id, key, branch) => {
+                // Unless the prompt has moved on since.
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id).filter(|t| t.git.asked.as_ref() == Some(&key)) {
+                    tab.git.branch = branch;
+                }
+                Task::none()
+            }
+            Message::Scrolled(area) => {
+                crate::ui::show_scrollbar(area, 1.0);
+                self.scrolled_at = Some(std::time::Instant::now());
+                Task::none()
+            }
+            Message::ScrollbarTick => {
+                // Scrolling stopped a moment ago: fade the bar out, then forget it.
+                if let Some(over) = self.scrolled_at.and_then(|at| at.elapsed().checked_sub(SCROLLBAR_LINGER)) {
+                    let left = 1.0 - over.as_secs_f32() / SCROLLBAR_FADE.as_secs_f32();
+                    if left > 0.0 {
+                        crate::ui::fade_scrollbar(left);
+                    } else {
+                        crate::ui::show_scrollbar(0, 0.0);
+                        self.scrolled_at = None;
+                    }
+                }
+                Task::none()
+            }
             Message::FoldTick => {
                 let now = std::time::Instant::now();
                 let start = match self.fold_clock {
@@ -2080,23 +2192,22 @@ impl CoShell {
                 let (masked, secrets) = coshell_ai::redact::mask(&format!("$ {cmd}\n{output}"));
                 let a = Attachment { label: tf("블록: {0}", &[&cmd.chars().take(40).collect::<String>()]), masked, secrets };
                 let question = tf("방금 실행한 `{0}` 결과를 분석하고 필요한 조치를 알려줘.", &[&cmd]);
-                if !self.ai.open {
-                    self.ai.open = true;
-                    self.settings.ai_panel_open = true;
-                    self.state_dirty = true;
-                }
                 if let Some(c) = self.chat_mut(id) {
                     c.draft = text_editor::Content::with_text(&question);
                 }
                 if prod {
-                    // Production output needs an explicit look before it can leave the machine.
+                    // Production output needs an explicit look before it can leave the machine;
+                    // the question then waits in the chat's field to be sent.
                     self.attach_confirm = Some((id, a));
+                    self.ask = Some((id, format!("#{question}")));
+                    self.ask_joined = false;
                     return Task::none();
                 }
                 if let Some(c) = self.chat_mut(id) {
                     c.attachment = Some(a);
                 }
-                self.ai_send(id)
+                let focus = self.open_chat(id);
+                Task::batch([self.ai_send(id), focus])
             }
             Message::FocusTerminal => self.focus_terminal(),
             Message::AskInput(text) => {
@@ -2110,13 +2221,17 @@ impl CoShell {
                 Task::none()
             }
             Message::AskSubmit => {
-                let Some((id, text)) = self.ask.take() else { return Task::none() };
-                let focus = self.focus_terminal();
+                let Some((id, text)) = self.ask.clone() else { return Task::none() };
                 let q = text.trim_start().trim_start_matches('#').trim().to_string();
-                if q.is_empty() {
-                    return focus;
+                // Nothing to send (no question, no attached output), or a reply is still coming: what is typed waits.
+                let Some(chat) = self.tabs.iter().find(|t| t.id == id).map(|t| &t.chat) else { return Task::none() };
+                if (q.is_empty() && chat.attachment.is_none()) || chat.is_streaming() {
+                    return Task::none();
                 }
-                Task::batch([focus, self.ask_from_terminal(id, q)])
+                // Sent: the field stays open for the next question, like a chat.
+                self.ask = Some((id, "#".into()));
+                self.ask_joined = false;
+                self.ask_from_terminal(id, q)
             }
             Message::AskCancel => {
                 self.ask = None;
@@ -2153,12 +2268,7 @@ impl CoShell {
             }
             Message::AiDiagnose => {
                 let Some(id) = self.active else { return Task::none() };
-                if !self.ai.open {
-                    self.ai.open = true;
-                    self.settings.ai_panel_open = true;
-                    self.state_dirty = true;
-                }
-                self.update(Message::AiSuggest(id, tr("이 서버의 현재 상태(디스크, 메모리, 부하)를 빠르게 진단해줘").into(), false))
+                self.ask_from_terminal(id, tr("이 서버의 현재 상태(디스크, 메모리, 부하)를 빠르게 진단해줘").into())
             }
             Message::ProdGuard => {
                 self.prod_guard = !self.prod_guard;
@@ -2377,6 +2487,9 @@ impl CoShell {
             | Message::SettingsCursor(_)
             | Message::SettingsScrollback(_)
             | Message::SettingsAttachLines(_)
+            | Message::SettingsScrollbackStep(_)
+            | Message::SettingsAttachLinesStep(_)
+            | Message::SettingsTermTab(_)
             | Message::SettingsOptionMeta(_)
             | Message::SettingsUpdateCheck(_)) => {
                 self.update_settings(m);
@@ -3152,11 +3265,10 @@ impl CoShell {
 
     fn update_ai(&mut self, message: Message) -> Task<Message> {
         match message {
+            // ⌘L: the conversation over the active tab's terminal, opened or closed.
             Message::AiToggle => {
-                self.ai.open = !self.ai.open;
-                self.settings.ai_panel_open = self.ai.open;
-                self.state_dirty = true;
-                if self.ai.open { self.focus_ai() } else { self.focus_terminal() }
+                let Some(id) = self.active else { return Task::none() };
+                if self.ask.as_ref().is_some_and(|(t, _)| *t == id) { self.update(Message::AskCancel) } else { self.open_chat(id) }
             }
             Message::AiProfile(pid) => {
                 if let Some(e) = self.ai.set_active(&pid) {
@@ -3164,13 +3276,6 @@ impl CoShell {
                 }
                 Task::none()
             }
-            Message::AiDraft(id, action) => {
-                if let Some(c) = self.chat_mut(id) {
-                    c.draft.perform(action);
-                }
-                Task::none()
-            }
-            Message::AiSend(id) => self.ai_send(id),
             Message::AiStop(id) => {
                 if let Some(c) = self.chat_mut(id) {
                     c.stop();
@@ -3207,7 +3312,7 @@ impl CoShell {
             }
             Message::AiAttach(id) => {
                 self.attach_output(id);
-                self.focus_ai()
+                self.open_chat(id)
             }
             Message::AiDetach(id) => {
                 if let Some(c) = self.chat_mut(id) {
@@ -3220,7 +3325,7 @@ impl CoShell {
                     c.stop();
                     *c = Chat::default();
                 }
-                self.focus_ai()
+                self.open_chat(id)
             }
             Message::AiRetry(id) => {
                 let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Task::none() };
@@ -3234,15 +3339,20 @@ impl CoShell {
                 if let Some(c) = self.chat_mut(id) {
                     c.draft = text_editor::Content::with_text(&text);
                 }
-                if self.attach_confirm.is_some() { Task::none() } else { self.ai_send(id) }
+                if self.attach_confirm.is_some() {
+                    // Waiting for a look at the output first: the question waits in the chat's field.
+                    self.ask = Some((id, format!("#{text}")));
+                    self.ask_joined = false;
+                    return Task::none();
+                }
+                self.ai_send(id)
             }
             Message::AttachConfirm => {
-                if let Some((id, a)) = self.attach_confirm.take()
-                    && let Some(c) = self.chat_mut(id)
-                {
+                let Some((id, a)) = self.attach_confirm.take() else { return Task::none() };
+                if let Some(c) = self.chat_mut(id) {
                     c.attachment = Some(a);
                 }
-                self.focus_ai()
+                self.open_chat(id)
             }
             Message::AttachCancel => {
                 self.attach_confirm = None;
@@ -3403,8 +3513,8 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        // The face shows on the tab bar's AI button (any open tab) and in the AI panel.
-        let blink = if self.active.is_some() || self.ai.open {
+        // The face shows on the tab bar's AI button and in the chat (any open tab).
+        let blink = if self.active.is_some() {
             iced::time::every(BLINK_EVERY).map(|_| Message::FaceBlink)
         } else {
             Subscription::none()
@@ -3414,8 +3524,9 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        // The chat shows the active tab's conversation only.
-        let fold = if self.ai.open && self.active_tab().is_some_and(|t| t.chat.is_streaming()) {
+        // The chat sheet shows the active tab's conversation only.
+        let chat_shown = self.ask.as_ref().is_some_and(|(id, _)| Some(*id) == self.active);
+        let fold = if chat_shown && self.active_tab().is_some_and(|t| t.chat.is_streaming()) {
             iced::time::every(FOLD_TICK).map(|_| Message::FoldTick)
         } else {
             Subscription::none()
@@ -3433,7 +3544,14 @@ impl CoShell {
             }
             _ => Subscription::none(),
         };
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow])
+        let branch = if self.settings.block_view && self.live_tab().is_some() { iced::time::every(crate::branch::EVERY).map(|_| Message::BranchTick) } else { Subscription::none() };
+        // Coarse while the bar just stays; every frame while it fades.
+        let scrollbar = match self.scrolled_at {
+            Some(at) if at.elapsed() + SCROLLBAR_TICK >= SCROLLBAR_LINGER => iced::time::every(SCROLLBAR_FADE_TICK).map(|_| Message::ScrollbarTick),
+            Some(_) => iced::time::every(SCROLLBAR_TICK).map(|_| Message::ScrollbarTick),
+            None => Subscription::none(),
+        };
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow, scrollbar, branch])
     }
 }
 

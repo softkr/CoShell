@@ -28,6 +28,7 @@ svg_handle!(COPY, "icons/copy.svg");
 svg_handle!(KEY, "icons/key.svg");
 svg_handle!(ZAP, "icons/zap.svg");
 svg_handle!(TRASH, "icons/trash.svg");
+svg_handle!(ERASER, "icons/eraser.svg");
 svg_handle!(SEARCH, "icons/search.svg");
 svg_handle!(LOCK, "icons/lock.svg");
 svg_handle!(LOCK_OPEN, "icons/lock-open.svg");
@@ -52,6 +53,11 @@ svg_handle!(EXTERNAL_LINK, "icons/external-link.svg");
 svg_handle!(MORE, "icons/more.svg");
 svg_handle!(PLAY, "icons/play.svg");
 svg_handle!(PAPERCLIP, "icons/paperclip.svg");
+svg_handle!(GIT_BRANCH, "icons/git-branch.svg");
+// Marks for the system a shell runs on (Font Awesome Free brand icons, see assets/icons/README.md).
+svg_handle!(OS_MAC, "icons/os-mac.svg");
+svg_handle!(OS_WINDOWS, "icons/os-windows.svg");
+svg_handle!(OS_LINUX, "icons/os-linux.svg");
 
 /// 256px PNG for the window / taskbar icon (Windows, Linux; macOS uses the bundle's .icns).
 const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");

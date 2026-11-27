@@ -11,8 +11,10 @@ use crate::app::{ASK_INPUT, CoShell, Message, RUN_INPUT, SEARCH_INPUT, Tab};
 use crate::blocks::{self, Block, Mark, Prompt, Screen, Source};
 use crate::fonts::MONO;
 use crate::selectable::Selectable;
-use crate::icons::{COPY, SEARCH, SEND, X};
+use crate::icons::{COPY, FOLDER, GIT_BRANCH, OS_LINUX, OS_MAC, OS_WINDOWS, SEARCH, SEND, STOP, X};
 use crate::theme::{self, alpha};
+use coshell_term::alacritty_terminal::vte::ansi::Color as AnsiColor;
+use coshell_term::{Run, StyledLine};
 use crate::ui::{El, kbd, mono};
 
 const TEXT: f32 = 13.0;
@@ -22,6 +24,10 @@ const R_DOCK: f32 = 16.0;
 const OUTPUT_LINE_H: f32 = 24.0;
 const MONO_SEMIBOLD: Font = crate::fonts::weight(MONO, iced::font::Weight::Semibold);
 const MONO_MEDIUM: Font = crate::fonts::weight(MONO, iced::font::Weight::Medium);
+const MONO_BOLD: Font = crate::fonts::weight(MONO, iced::font::Weight::Bold);
+
+/// Turns a program's colour code into the colour the terminal underneath would draw.
+type Paint<'p> = &'p dyn Fn(AnsiColor) -> Color;
 
 fn badge<'a>(source: Source) -> El<'a> {
     let (content, bg, line, fg): (El<'a>, Color, Color, Color) = match source {
@@ -55,32 +61,173 @@ fn prompt_parts<'a>(p: &Prompt) -> Vec<El<'a>> {
     parts
 }
 
-/// Command output, selectable and copyable (⌘C) like the terminal underneath.
-fn output_text<'a>(lines: &[String], query: &str) -> El<'a> {
-    let body = lines.join("\n");
-    let mut rows: Vec<Vec<Span<'a, (), Font>>> = vec![Vec::new()];
-    for (s, m) in blocks::highlight(body.trim_end(), query) {
-        for (k, part) in s.split('\n').enumerate() {
-            if k > 0 {
-                rows.push(Vec::new());
-            }
-            if part.is_empty() {
-                continue;
-            }
-            let sp = span(part.to_string());
-            let sp = match m {
-                Mark::Plain => sp.color(alpha(theme::TEXT, 0.9)),
-                Mark::High | Mark::Warn => sp.color(theme::WARN).font(MONO_SEMIBOLD),
-                Mark::Err => sp.color(theme::ERR_TX).font(MONO_SEMIBOLD),
-                Mark::Ok => sp.color(theme::OK).font(MONO_MEDIUM),
-                Mark::Path => sp.color(theme::INFO),
-                Mark::Found => sp.color(theme::AMBER_200).background(alpha(theme::WARN, 0.3)),
-            };
-            rows.last_mut().expect("one row").push(sp);
-        }
+/// Height of the prompt's segments, and how far their slanted edges lean.
+const SEG_H: f32 = 24.0;
+const SEG_SLANT: f32 = 10.0;
+/// Segment fills: the system, the folder, the git branch.
+const SEG_SYSTEM: Color = theme::SLATE_600;
+const SEG_FOLDER: Color = theme::BLUE;
+const SEG_BRANCH: Color = theme::GREEN;
+/// The slanted edge between two segments: `left`'s colour above the diagonal, `right`'s below.
+struct Slant {
+    left: Color,
+    right: Color,
+}
+
+impl iced::widget::canvas::Program<Message> for Slant {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &iced::Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::Point;
+        use iced::widget::canvas::{Frame, Path};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let triangle = |a: Point, b: Point, c: Point| {
+            Path::new(|p| {
+                p.move_to(a);
+                p.line_to(b);
+                p.line_to(c);
+                p.close();
+            })
+        };
+        frame.fill(&triangle(Point::ORIGIN, Point::new(w, 0.0), Point::new(0.0, h)), self.left);
+        frame.fill(&triangle(Point::new(w, 0.0), Point::new(w, h), Point::new(0.0, h)), self.right);
+        vec![frame.into_geometry()]
     }
+}
+
+/// A slanted edge, to sit between two segments' fills.
+fn slant<'a>(left: Color, right: Color) -> El<'a> {
+    // The drawn edges are soft where they meet the segments beside them; a hair of each
+    // side's colour underneath keeps the background from showing through there.
+    let hair = |c: Color| container(Space::new()).width(1).height(SEG_H).style(crate::ui::fill(c));
+    iced::widget::stack![
+        row![hair(left), Space::new().width(Length::Fill), hair(right)].width(SEG_SLANT).height(SEG_H),
+        iced::widget::canvas::Canvas::new(Slant { left, right }).width(SEG_SLANT).height(SEG_H),
+    ]
+    .into()
+}
+
+/// The kinds of system the prompt's first segment tells apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum System {
+    Mac,
+    Windows,
+    Linux,
+}
+
+/// The kind of system named `os` (as a server or this computer reports it); servers are Linux unless they say otherwise.
+fn system_kind(os: &str) -> System {
+    let os = os.to_lowercase();
+    if os.contains("mac") || os.contains("darwin") {
+        System::Mac
+    } else if os.contains("windows") {
+        System::Windows
+    } else {
+        System::Linux
+    }
+}
+
+/// The system a tab's shell runs on and its full name, once known. A local shell runs on
+/// this computer's system even before its name has been read.
+fn system_of(tab: &Tab) -> Option<(System, String)> {
+    let here = if cfg!(target_os = "macos") { (System::Mac, "macOS") } else if cfg!(target_os = "windows") { (System::Windows, "Windows") } else { (System::Linux, "Linux") };
+    match tab.stats.as_ref().and_then(|s| s.os.as_deref()).map(str::trim) {
+        Some(os) if tab.is_local() => Some((here.0, os.to_string())),
+        Some(os) => Some((system_kind(os), os.to_string())),
+        None if tab.is_local() => Some((here.0, here.1.to_string())),
+        None => None,
+    }
+}
+
+/// Where a past command ran: the dock's folder segment in small, on a card's head line.
+fn folder_chip<'a>(cwd: &str) -> El<'a> {
+    let folder = if cwd.is_empty() { "~".to_string() } else { cwd.to_string() };
+    let label = row![crate::icons::tinted(&FOLDER, 11.0, theme::ACCENT_HI), text(folder).size(12).font(MONO_MEDIUM).color(theme::ACCENT_HI).wrapping(text::Wrapping::None)]
+        .spacing(5)
+        .align_y(Alignment::Center);
+    container(label)
+        .padding([2, 8])
+        .style(|_| container::Style {
+            background: Some(Background::Color(alpha(SEG_FOLDER, 0.16))),
+            border: Border { radius: 6.0.into(), ..Default::default() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The prompt as segments with slanted edges: the system, the folder, and the folder's git branch.
+fn prompt_segments<'a>(tab: &Tab, p: &Prompt) -> El<'a> {
+    let label = |icon: &std::sync::LazyLock<iced::widget::svg::Handle>, s: String, color: Color| -> El<'a> {
+        row![crate::icons::tinted(icon, 12.0, color), text(s).size(TEXT).font(MONO_SEMIBOLD).color(color).wrapping(text::Wrapping::None)].spacing(6).align_y(Alignment::Center).into()
+    };
+    let mut segments: Vec<(El<'a>, Color)> = Vec::new();
+    if let Some((system, name)) = system_of(tab) {
+        let icon = match system {
+            System::Mac => &OS_MAC,
+            System::Windows => &OS_WINDOWS,
+            System::Linux => &OS_LINUX,
+        };
+        // The picture says which kind; the name (which Linux, which version) is a hover away.
+        segments.push((crate::ui::tip(crate::icons::tinted(icon, 14.0, theme::TEXT), name, iced::widget::tooltip::Position::Top), SEG_SYSTEM));
+    }
+    segments.push((label(&FOLDER, if p.cwd.is_empty() { "~".to_string() } else { p.cwd.clone() }, theme::ON_ACCENT), SEG_FOLDER));
+    if let Some(branch) = &tab.git.branch {
+        segments.push((label(&GIT_BRANCH, branch.clone(), theme::BG_0), SEG_BRANCH));
+    }
+    let fills: Vec<Color> = segments.iter().map(|(_, fill)| *fill).collect();
+    let mut r = row![].align_y(Alignment::Center);
+    for (i, (content, fill)) in segments.into_iter().enumerate() {
+        // The first one's left end is rounded like the dock it sits in.
+        let (left, round) = if i == 0 { (10.0, 8.0) } else { (4.0, 0.0) };
+        r = r.push(container(content).height(SEG_H).center_y(SEG_H).padding(Padding { top: 0.0, right: 4.0, bottom: 0.0, left }).style(move |_| container::Style {
+            background: Some(Background::Color(fill)),
+            border: Border { radius: iced::border::Radius { top_left: round, bottom_left: round, ..Default::default() }, ..Default::default() },
+            ..Default::default()
+        }));
+        r = r.push(slant(fill, fills.get(i + 1).copied().unwrap_or(Color::TRANSPARENT)));
+    }
+    r.into()
+}
+
+/// Command output, selectable and copyable (⌘C) like the terminal underneath.
+fn output_text<'a>(lines: &[StyledLine], query: &str, paint: Paint<'_>) -> El<'a> {
+    let end = lines.iter().rposition(|l| !l.text.trim().is_empty()).map_or(0, |i| i + 1);
+    let rows: Vec<Vec<Span<'a, (), Font>>> = lines[..end].iter().map(|l| line_spans(l, query, paint)).collect();
     let out = Selectable::new(rows, Message::AiCopy).font(MONO).size(TEXT).line_height(OUTPUT_LINE_H).selection(alpha(theme::ACCENT, 0.35));
     container(out).padding(Padding::ZERO.left(4.0)).into()
+}
+
+/// One output line: the program's colours where it chose them, the app's marks on
+/// the rest, and search matches over both.
+fn line_spans<'a>(line: &StyledLine, query: &str, paint: Paint<'_>) -> Vec<Span<'a, (), Font>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (piece, mark) in blocks::highlight(&line.text, query) {
+        let end = at + piece.len();
+        // Cut the piece where coloured runs start or end inside it.
+        let mut cuts = vec![at, end];
+        cuts.extend(line.runs.iter().flat_map(|r| [r.start, r.end]).filter(|c| (at + 1..end).contains(c)));
+        cuts.sort_unstable();
+        for w in cuts.windows(2) {
+            let run = line.runs.iter().find(|r| r.start <= w[0] && w[1] <= r.end);
+            out.push(paint_span(span(line.text[w[0]..w[1]].to_string()), mark, run, paint));
+        }
+        at = end;
+    }
+    out
+}
+
+fn paint_span<'a>(sp: Span<'a, (), Font>, mark: Mark, run: Option<&Run>, paint: Paint<'_>) -> Span<'a, (), Font> {
+    match (mark, run) {
+        (Mark::Found, _) => sp.color(theme::AMBER_200).background(alpha(theme::WARN, 0.3)),
+        (_, Some(r)) => sp.color(paint(r.fg)).font(if r.bold { MONO_BOLD } else { MONO }),
+        (Mark::Plain, None) => sp.color(alpha(theme::TEXT, 0.9)),
+        (Mark::High | Mark::Warn, None) => sp.color(theme::WARN).font(MONO_SEMIBOLD),
+        (Mark::Err, None) => sp.color(theme::ERR_TX).font(MONO_SEMIBOLD),
+        (Mark::Ok, None) => sp.color(theme::OK).font(MONO_MEDIUM),
+        (Mark::Path, None) => sp.color(theme::INFO),
+    }
 }
 
 fn small_btn<'a>(content: impl Into<El<'a>>, msg: Message) -> El<'a> {
@@ -99,10 +246,16 @@ fn small_btn<'a>(content: impl Into<El<'a>>, msg: Message) -> El<'a> {
         .into()
 }
 
-fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, hovered: bool, running: bool, query: &str) -> El<'a> {
+#[allow(clippy::too_many_arguments)]
+fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, hovered: bool, running: bool, query: &str, paint: Paint<'_>) -> El<'a> {
     let mut head = row![badge(meta.map_or(Source::User, |m| m.source))].spacing(8).align_y(Alignment::Center);
-    for p in prompt_parts(&b.prompt) {
-        head = head.push(p);
+    if b.prompt.sym.is_empty() {
+        // A prompt of the user's own making: shown as it is.
+        for p in prompt_parts(&b.prompt) {
+            head = head.push(p);
+        }
+    } else {
+        head = head.push(folder_chip(&b.prompt.cwd)).push(mono(b.prompt.sym.clone(), TEXT, theme::TEXT_2));
     }
     head = head.push(container(text(b.cmd.clone()).size(TEXT).font(MONO_MEDIUM).color(theme::SLATE_100)).width(Length::Fill));
     let mut right = row![].spacing(8).align_y(Alignment::Center);
@@ -124,7 +277,7 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
         right = right.push(info);
     }
     // Hover actions keep their room so nothing moves when they appear.
-    let output = b.output.join("\n");
+    let output = b.output.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
     let actions: El<'a> = if hovered {
         row![
             small_btn(text(tr("AI 분석")).size(10), Message::BlockAsk(tab.id, b.cmd.clone(), output.clone())),
@@ -146,8 +299,8 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
     right = right.push(actions);
     head = head.push(right);
     let mut col = column![head].spacing(10);
-    if !b.output.iter().all(|l| l.trim().is_empty()) {
-        col = col.push(output_text(&b.output, query));
+    if !b.output.iter().all(|l| l.text.trim().is_empty()) {
+        col = col.push(output_text(&b.output, query, paint));
     }
     let card = container(col).padding(16).width(Length::Fill).style(move |_| container::Style {
         background: Some(Background::Color(theme::CARD)),
@@ -224,8 +377,7 @@ fn run_row<'a>(app: &'a CoShell, tab: &Tab, running: bool, secret: bool) -> El<'
 
 /// The prompt waiting for input: what is typed, the caret, and an inline suggestion.
 fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail: usize) -> El<'a> {
-    let asking = app.ask.as_ref().filter(|(id, _)| *id == tab.id).map(|(_, q)| q.as_str());
-    let ai_mode = asking.is_some() || typed.trim_start().starts_with('#');
+    let ai_mode = typed.trim_start().starts_with('#');
     let mut r = row![].spacing(6).align_y(Alignment::Center);
     if ai_mode {
         r = r.push(
@@ -236,28 +388,22 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
             }),
         );
     }
-    for part in prompt_parts(p) {
-        r = r.push(part);
+    if p.sym.is_empty() {
+        // A prompt of the user's own making: shown as it is.
+        for part in prompt_parts(p) {
+            r = r.push(part);
+        }
+    } else {
+        r = r.push(prompt_segments(tab, p)).push(mono(p.sym.clone(), TEXT, theme::TEXT_2));
     }
     let caret = || -> El<'a> { container(Space::new()).width(2).height(16).style(crate::ui::fill(theme::ACCENT_TX)).into() };
     let chars: Vec<char> = typed.chars().collect();
     let split = chars.len().saturating_sub(caret_tail);
     let before: String = chars[..split].iter().collect();
     let after: String = chars[split..].iter().collect();
-    let ghost = blocks::ghost(typed, &tab.metas).filter(|_| asking.is_none());
+    let ghost = blocks::ghost(typed, &tab.metas);
     let mut line = row![].align_y(Alignment::Center);
-    if let Some(q) = asking {
-        line = line.push(
-            text_input("", q)
-                .id(ASK_INPUT)
-                .on_input(Message::AskInput)
-                .on_submit(Message::AskSubmit)
-                .font(MONO)
-                .size(TEXT)
-                .padding(0)
-                .style(|t, st| text_input::Style { value: theme::SLATE_100, ..crate::ui::bare_input_style(t, st) }),
-        );
-    } else if typed.is_empty() {
+    if typed.is_empty() {
         line = line.push(caret()).push(mono(tr("명령어 입력 (Tab 자동완성 · '#'으로 바로 AI 질문)..."), TEXT, theme::TEXT_3));
     } else {
         // No wrapping, so a trailing space keeps its width and moves the caret.
@@ -268,22 +414,27 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
         }
     }
     r = r.push(container(line).width(Length::Fill).clip(true));
-    if asking.is_some() {
-        r = r.push(mono(tr("Enter 질문 · Esc 취소"), 11.0, theme::TEXT_3));
-    } else if ghost.is_some() {
+    if ghost.is_some() {
         r = r.push(kbd("Tab ⇥"));
     }
-    // Return: sends the question, or Enter to the shell.
+    // The conversation (⌘L, or `#`), for the mouse.
+    let chat = button(container(crate::ui::face(13.0, app.face.idle())).center(28)).padding(0).on_press(Message::AiToggle).style(|_, st| button::Style {
+        background: matches!(st, button::Status::Hovered | button::Status::Pressed).then_some(Background::Color(theme::BG_3)),
+        border: Border { radius: 10.0.into(), ..Default::default() },
+        ..Default::default()
+    });
+    r = r.push(crate::ui::tip(chat, tr("AI 대화 (⌘L)"), iced::widget::tooltip::Position::Top));
+    // Return: Enter to the shell.
     let send = button(container(crate::icons::tinted(&SEND, 13.0, theme::ON_ACCENT)).center(28))
         .padding(0)
-        .on_press(if asking.is_some() { Message::AskSubmit } else { Message::Input(tab.id, b"\r".to_vec()) })
+        .on_press(Message::Input(tab.id, b"\r".to_vec()))
         .style(|_, st| button::Style {
             background: Some(Background::Color(alpha(theme::ACCENT, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.88 } else { 1.0 }))),
             border: Border { radius: 10.0.into(), ..Default::default() },
             ..Default::default()
         });
     r = r.push(send);
-    let focused = app.terminal_active(tab) || asking.is_some();
+    let focused = app.terminal_active(tab);
     container(r)
         .padding(Padding { top: 8.0, right: 8.0, bottom: 8.0, left: 14.0 })
         .width(Length::Fill)
@@ -318,6 +469,110 @@ fn search_strip<'a>(query: &'a str, shown: usize, total: usize) -> El<'a> {
     column![container(strip).padding([8, 16]).width(Length::Fill).style(crate::ui::fill(theme::BG_1)), crate::ui::rule(true)].into()
 }
 
+/// Width of the lit edge around the dock in question mode.
+const GLOW_W: f32 = 1.5;
+/// Where the edge's light rests while nothing is being answered.
+const GLOW_REST: f32 = 2.2;
+/// Widest the chat sheet gets: about 80 characters of a reply per line.
+const SHEET_W: f32 = 700.0;
+/// The sheet's height is what was said, up to this part of the window, so the
+/// commands the assistant runs stay in view above it.
+const SHEET_MAX_PART: f32 = 0.5;
+const SHEET_R: f32 = 20.0;
+/// Height of the fade under the sheet's top edge.
+const SHEET_FADE: f32 = 22.0;
+
+/// The light along the dock's edge. It rests at one angle and travels round while a reply is coming.
+fn glow(app: &CoShell, working: bool) -> iced::gradient::Linear {
+    let angle = if working { app.fold / crate::ui_status::CYCLE_SECS * std::f32::consts::TAU } else { GLOW_REST };
+    iced::gradient::Linear::new(iced::Radians(angle)).add_stop(0.0, theme::PURPLE).add_stop(0.5, theme::BLUE).add_stop(1.0, theme::TEAL)
+}
+
+/// Question mode (`#`): the dock is the chat's input. Enter sends and it stays open for the
+/// next question; while a reply is coming the send button is a stop button.
+fn ask_row<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
+    let working = tab.chat.is_streaming();
+    let field = text_input("", q)
+        .id(ASK_INPUT)
+        .on_input(Message::AskInput)
+        .on_submit(Message::AskSubmit)
+        .font(MONO)
+        .size(TEXT)
+        .padding(0)
+        .width(Length::Fill)
+        .style(|t, st| text_input::Style { value: theme::SLATE_100, ..crate::ui::bare_input_style(t, st) });
+    let close = button(crate::icons::tinted(&X, 12.0, theme::TEXT_2)).padding(6).style(crate::ui::btn_style(crate::ui::Btn::Ghost)).on_press(Message::AskCancel);
+    let round = |bg: Background| button::Style { background: Some(bg), border: Border { radius: 10.0.into(), ..Default::default() }, ..Default::default() };
+    let action: El<'a> = if working {
+        let stop = button(container(crate::icons::tinted(&STOP, 12.0, theme::TEXT)).center(28)).padding(0).on_press(Message::AiStop(tab.id)).style(move |_, st| {
+            round(Background::Color(alpha(Color::WHITE, if matches!(st, button::Status::Hovered | button::Status::Pressed) { 0.22 } else { 0.14 })))
+        });
+        crate::ui::tip(stop, tr("중지"), iced::widget::tooltip::Position::Top)
+    } else {
+        let edge = glow(app, false);
+        button(container(crate::icons::tinted(&SEND, 13.0, theme::ON_ACCENT)).center(28)).padding(0).on_press(Message::AskSubmit).style(move |_, _| round(Background::Gradient(edge.into()))).into()
+    };
+    let r = row![
+        crate::ui::face(14.0, if working { app.face } else { app.face.idle() }),
+        field,
+        mono(tr("Enter 질문 · Esc 닫기"), 11.0, theme::TEXT_3),
+        crate::ui::tip(close, tr("대화 닫기"), iced::widget::tooltip::Position::Top),
+        action,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    // The same size as the prompt's dock, so nothing moves when `#` is pressed.
+    let inner = container(r).padding(Padding { top: 8.0 - GLOW_W, right: 8.0 - GLOW_W, bottom: 8.0 - GLOW_W, left: 14.0 - GLOW_W }).width(Length::Fill).style(|_| container::Style {
+        background: Some(Background::Color(theme::BG_2)),
+        border: Border { radius: (R_DOCK - GLOW_W).into(), ..Default::default() },
+        ..Default::default()
+    });
+    let edge = glow(app, working);
+    container(inner)
+        .padding(GLOW_W)
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Background::Gradient(edge.into())),
+            border: Border { radius: R_DOCK.into(), ..Default::default() },
+            shadow: iced::Shadow { color: alpha(theme::PURPLE, if working { 0.45 } else { 0.25 }), offset: iced::Vector::new(0.0, 4.0), blur_radius: 28.0 },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The conversation, on a sheet of dark glass that rises from the dock over the terminal.
+fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
+    let max_height = app.settings.window.height * SHEET_MAX_PART;
+    let talk = crate::ui_ai::sheet_conversation(tab, app.prod_guard, app.face, app.fold, max_height);
+    // What has scrolled up fades into the sheet instead of being cut at its edge.
+    let fade = container(Space::new()).width(Length::Fill).height(SHEET_FADE).style(|_| {
+        let into_sheet = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, theme::BG_3).add_stop(1.0, alpha(theme::BG_3, 0.0));
+        container::Style { background: Some(Background::Gradient(into_sheet.into())), ..Default::default() }
+    });
+    let talk = column![iced::widget::stack![talk, fade], crate::ui::rule(true), crate::ui_ai::sheet_tools(app, tab)];
+    let sheet = container(talk).max_width(SHEET_W).clip(true).style(|_| {
+        let glass = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, alpha(theme::BG_3, 0.9)).add_stop(1.0, alpha(theme::BG_1, 0.94));
+        container::Style {
+            background: Some(Background::Gradient(glass.into())),
+            border: Border { color: theme::LINE_2, width: 1.0, radius: SHEET_R.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.55), offset: iced::Vector::new(0.0, 16.0), blur_radius: 44.0 },
+            text_color: Some(theme::TEXT),
+            ..Default::default()
+        }
+    });
+    // Clicks on the sheet stay on it; around it the terminal is still within reach.
+    container(iced::widget::opaque(sheet)).center_x(Length::Fill).align_bottom(Length::Fill).padding(Padding { top: 24.0, right: 28.0, bottom: 4.0, left: 28.0 }).into()
+}
+
+/// Padding around the dock at the bottom of the terminal.
+const DOCK_PAD: Padding = Padding { top: 8.0, right: 28.0, bottom: 16.0, left: 28.0 };
+
+/// The chat over a terminal that has no block view (a full-screen program is running):
+/// the sheet and the question dock along the bottom, the program still visible above.
+pub fn chat_overlay<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
+    column![chat_sheet(app, tab), iced::widget::opaque(container(ask_row(app, tab, q)).padding(DOCK_PAD))].into()
+}
+
 pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
     let query = app.search.as_ref().map_or("", |s| s.query.as_str());
     let q = query.trim().to_lowercase();
@@ -325,16 +580,24 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
     let running = screen.running();
     let last = screen.blocks.len().saturating_sub(1);
     let mut col = column![].spacing(16).width(Length::Fill);
-    if !screen.preamble.iter().all(|l| l.trim().is_empty()) && q.is_empty() {
-        col = col.push(container(output_text(&screen.preamble, "")).padding(10));
+    // Output in the terminal's colours (and any a program redefined). The cards are dark whatever
+    // colour scheme the raw terminal has, so the dark palette is the one that reads on them.
+    let palette = &theme::TERM_DARK;
+    let colors = match &tab.phase {
+        crate::app::Phase::Live(s) => *s.term().lock().colors(),
+        _ => Default::default(),
+    };
+    let paint = move |c: AnsiColor| crate::terminal::resolve(c, palette, &colors);
+    if !screen.preamble.iter().all(|l| l.text.trim().is_empty()) && q.is_empty() {
+        col = col.push(container(output_text(&screen.preamble, "", &paint)).padding(10));
     }
     let mut shown = 0;
     for (i, b) in screen.blocks.iter().enumerate() {
-        if !q.is_empty() && !b.cmd.to_lowercase().contains(&q) && !b.output.iter().any(|l| l.to_lowercase().contains(&q)) {
+        if !q.is_empty() && !b.cmd.to_lowercase().contains(&q) && !b.output.iter().any(|l| l.text.to_lowercase().contains(&q)) {
             continue;
         }
         shown += 1;
-        col = col.push(block_card(tab, i, b, metas[i], app.block_hover == Some(i), running && i == last, query));
+        col = col.push(block_card(tab, i, b, metas[i], app.block_hover == Some(i), running && i == last, query, &paint));
     }
     if !q.is_empty() && shown == 0 {
         col = col.push(
@@ -343,28 +606,33 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
                 .padding([40, 0]),
         );
     }
-    // At a prompt the dock mirrors the shell's line; with none (a program running) it takes input for it.
-    let dock = match &screen.current {
-        Some((p, typed)) => {
+    // In question mode the dock is the chat's input, whatever the shell is doing. Otherwise: at a
+    // prompt it mirrors the shell's line; with none (a program running) it takes input for it.
+    let asking = app.ask.as_ref().filter(|(id, _)| *id == tab.id).map(|(_, q)| q.as_str());
+    let dock = match (asking, &screen.current) {
+        (Some(q), _) => ask_row(app, tab, q),
+        (None, Some((p, typed))) => {
             let tail = match &tab.phase {
                 crate::app::Phase::Live(s) => blocks::cursor_tail(s.term()),
                 _ => 0,
             };
-            prompt_row(app, tab, p, typed, tail)
+            // It only mirrors the shell's line, so a click on it means typing to the shell.
+            mouse_area(prompt_row(app, tab, p, typed, tail)).on_press(Message::FocusTerminal).into()
         }
-        None => {
-            let last_line = screen.blocks.last().map_or(&screen.preamble, |b| &b.output).iter().rev().find(|l| !l.trim().is_empty());
-            run_row(app, tab, running, last_line.is_some_and(|l| blocks::asks_secret(l)))
+        (None, None) => {
+            let last_line = screen.blocks.last().map_or(&screen.preamble, |b| &b.output).iter().rev().find(|l| !l.text.trim().is_empty());
+            run_row(app, tab, running, last_line.is_some_and(|l| blocks::asks_secret(&l.text)))
         }
     };
-    let dock = Some(container(dock).padding(Padding { top: 8.0, right: 28.0, bottom: 16.0, left: 28.0 }));
+    let dock = Some(container(dock).padding(DOCK_PAD));
     col = col.push(Space::new().height(24));
     let body = crate::ui::scroll(container(col).padding(Padding { top: 24.0, right: 28.0, bottom: 0.0, left: 28.0 }).width(Length::Fill))
         .anchor_bottom()
         .height(Length::Fill)
         .width(Length::Fill);
     // A click anywhere gives the keyboard back to the shell.
-    let body = mouse_area(body).on_press(Message::FocusTerminal);
+    let body: El<'a> = mouse_area(body).on_press(Message::FocusTerminal).into();
+    let body = if asking.is_some() { iced::widget::stack![body, chat_sheet(app, tab)].into() } else { body };
     let mut layers = column![];
     if app.search.is_some() {
         layers = layers.push(search_strip(query, shown, screen.blocks.len()));
@@ -378,4 +646,51 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
         .height(Length::Fill)
         .style(|_| container::Style { background: Some(Background::Color(theme::BG_0)), text_color: Some(theme::TEXT), ..Default::default() })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coshell_term::alacritty_terminal::vte::ansi::NamedColor;
+
+    fn paint(c: AnsiColor) -> Color {
+        if c == AnsiColor::Named(NamedColor::Blue) { Color::from_rgb8(0, 0, 255) } else { Color::BLACK }
+    }
+
+    fn pieces(line: &StyledLine, query: &str) -> Vec<(String, Option<Color>, Option<Font>)> {
+        line_spans(line, query, &paint).into_iter().map(|s| (s.text.to_string(), s.color, s.font)).collect()
+    }
+
+    #[test]
+    fn program_colours_win_and_plain_text_keeps_the_app_marks() {
+        let blue = AnsiColor::Named(NamedColor::Blue);
+        // `ls`-style: a bold blue folder (whose name looks like a path), then uncoloured text with "error".
+        let text = "/var/logs error ok";
+        let line = StyledLine { text: text.into(), runs: vec![Run { start: 0, end: 9, fg: blue, bold: true }] };
+        let p = pieces(&line, "");
+        assert_eq!(p.iter().map(|(t, ..)| t.as_str()).collect::<String>(), text, "no text lost or repeated");
+        assert_eq!(p[0], ("/var/logs".into(), Some(Color::from_rgb8(0, 0, 255)), Some(MONO_BOLD)), "the program's colour, not the path mark");
+        assert!(p.contains(&("error".into(), Some(theme::ERR_TX), Some(MONO_SEMIBOLD))), "{p:?}");
+
+        // A search match is shown over a coloured run, and the run's remaining parts keep their colour.
+        let p = pieces(&line, "LOG");
+        assert_eq!(p[0], ("/var/".into(), Some(Color::from_rgb8(0, 0, 255)), Some(MONO_BOLD)));
+        assert_eq!(p[1].0, "log");
+        assert_eq!(p[1].1, Some(theme::AMBER_200));
+        assert_eq!(p[2], ("s".into(), Some(Color::from_rgb8(0, 0, 255)), Some(MONO_BOLD)));
+    }
+}
+
+#[cfg(test)]
+mod system_tests {
+    use super::*;
+
+    #[test]
+    fn systems_are_told_apart_by_name() {
+        assert_eq!(system_kind("macOS 27.2"), System::Mac);
+        assert_eq!(system_kind("Microsoft Windows Server 2022"), System::Windows);
+        for linux in ["Ubuntu 22.04.4 LTS", "Red Hat Enterprise Linux 9.4 (Plow)", "Rocky Linux 9.9 (Blue Onyx)", ""] {
+            assert_eq!(system_kind(linux), System::Linux, "{linux:?}");
+        }
+    }
 }

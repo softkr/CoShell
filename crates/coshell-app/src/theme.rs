@@ -24,7 +24,7 @@ pub const LINE_2: Color = alpha(WHITE, 0.15);
 // text: primary / secondary / tertiary labels
 pub const TEXT: Color = hex(0xF5F5F7);
 pub const TEXT_2: Color = hex(0xA1A1A6);
-pub const TEXT_3: Color = hex(0x6E6E73);
+pub const TEXT_3: Color = hex(0x8A8A8F);
 // brighter and dimmer neutrals
 pub const SLATE_100: Color = hex(0xFFFFFF);
 pub const SLATE_300: Color = hex(0xD1D1D6);

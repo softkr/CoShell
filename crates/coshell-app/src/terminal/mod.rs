@@ -229,7 +229,8 @@ fn indexed(i: usize, p: &TermPalette, colors: &Colors) -> Color {
     }
 }
 
-fn resolve(c: AnsiColor, p: &TermPalette, colors: &Colors) -> Color {
+/// The colour a cell's colour code stands for (also used by the block view).
+pub(crate) fn resolve(c: AnsiColor, p: &TermPalette, colors: &Colors) -> Color {
     match c {
         AnsiColor::Spec(c) => rgb(c),
         AnsiColor::Indexed(i) => indexed(i as usize, p, colors),

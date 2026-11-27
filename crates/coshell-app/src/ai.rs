@@ -16,8 +16,6 @@ use zeroize::Zeroizing;
 use crate::app::{Message, TabId};
 use crate::assist;
 
-pub const AI_INPUT: &str = "ai-input";
-
 pub struct Attachment {
     pub label: String,
     pub masked: String,
@@ -193,7 +191,6 @@ impl Settings {
 }
 
 pub struct Ai {
-    pub open: bool,
     pub store: ProfileStore,
     path: Option<PathBuf>,
     pub client: Client,
@@ -214,7 +211,7 @@ impl Ai {
     }
 
     pub fn new(store: ProfileStore, path: Option<PathBuf>, secrets: Arc<dyn SecretStore>) -> Self {
-        Self { open: true, store, path, client: Client::new(), secrets, settings: None }
+        Self { store, path, client: Client::new(), secrets, settings: None }
     }
 
     pub fn active(&self) -> &Profile {
