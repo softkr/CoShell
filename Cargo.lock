@@ -1037,6 +1037,7 @@ dependencies = [
  "coshell-term",
  "futures",
  "iced",
+ "iced_renderer",
  "iced_test",
  "muda",
  "objc2 0.6.5",
@@ -2527,6 +2528,7 @@ dependencies = [
  "bytes",
  "iced_core",
  "iced_futures",
+ "iced_selector",
  "raw-window-handle",
  "thiserror 2.0.21",
 ]

@@ -80,13 +80,31 @@ const SCROLLBAR_FADE_TICK: Duration = Duration::from_millis(16);
 /// The conversation's wave: how often it moves, how far each time (resting / while a reply
 /// is coming), and where its phase wraps (a common multiple of the ribbons' cycles).
 const WAVE_TICK: Duration = Duration::from_millis(33);
-/// How long the conversation takes to make its entrance.
-const CHAT_INTRO: Duration = Duration::from_millis(620);
+/// How long the conversation takes to pour out of the dock, and to be drawn back into it.
+const CHAT_INTRO: Duration = Duration::from_millis(550);
+const CHAT_OUTRO: Duration = Duration::from_millis(450);
 const WAVE_STEP: f32 = 0.035;
 const WAVE_STEP_BUSY: f32 = 0.12;
 const WAVE_PERIOD: f32 = std::f32::consts::TAU * 100.0;
+/// The light's clock starts over after this long (seconds): long enough that nobody sees it.
+const LIGHT_PERIOD: f32 = 3600.0;
+/// How long the light takes to find its voice, or lose it (seconds).
+const VOICE_EASE: f32 = 0.45;
 /// A longer pause between frames means the fold stopped: start it over from flat.
 const FOLD_RESTART: Duration = Duration::from_millis(250);
+
+/// How long a new shell has to show a prompt the block view recognises before the raw
+/// terminal is shown instead.
+const PROMPT_WAIT: Duration = Duration::from_secs(5);
+/// How often a lit snippet card's edge moves.
+const SNIPPET_GLOW_TICK: Duration = Duration::from_millis(33);
+/// How often to look again while waiting for it (so the raw terminal comes on time).
+const PROMPT_WAIT_TICK: Duration = Duration::from_millis(250);
+
+/// How much of something lasting `length` has played since `at`: 0 → 1.
+fn played(at: std::time::Instant, length: Duration) -> f32 {
+    (at.elapsed().as_secs_f32() / length.as_secs_f32()).min(1.0)
+}
 pub fn prompt_input_id(i: usize) -> String {
     format!("prompt-{i}")
 }
@@ -234,6 +252,15 @@ pub struct Tab {
     pub metas: Vec<crate::blocks::Meta>,
     /// How this session's prompt looks, once one has been seen.
     pub sig: Option<crate::blocks::Sig>,
+    /// When the shell started (or the connection came up), while it is live.
+    pub live_since: Option<std::time::Instant>,
+    /// Recent readings, for the resource card's graphs and gliding bars.
+    pub trend: crate::metrics::Trend,
+    /// The server is being watched: its readings come in by themselves (`metrics::watch`).
+    /// The watch holds the connection, so it ends with the tab or when the connection is let go.
+    pub watch: Option<iced::task::Handle>,
+    /// When the session ended (its banner slides in from then; how long it lasted).
+    pub exited_at: Option<std::time::Instant>,
     /// Live resource figures (CPU, memory, disk) and the server's OS, polled while connected.
     pub stats: Option<crate::metrics::Stats>,
     /// Remote files (SFTP), opened when the file panel is first shown for this tab.
@@ -466,6 +493,20 @@ pub struct CoShell {
     pub collapsed_groups: Vec<String>,
     /// Block under the pointer in the block view.
     pub block_hover: Option<usize>,
+    /// Snippet card under the pointer, and since when (its lit edge turns from then).
+    pub snippet_hover: Option<(usize, std::time::Instant)>,
+    /// When the side panel's list last made its entrance (a panel opened, the search changed).
+    pub panel_shown: Option<std::time::Instant>,
+    /// The panel and search last shown; none while the side panel is closed.
+    panel_seen: Option<(SidebarTab, String)>,
+    /// A server group folding open (true) or shut, and since when.
+    pub group_fold: Option<(String, bool, std::time::Instant)>,
+    /// Since when the pointer has been on the server row it is on (its lit edge turns from then).
+    pub host_hover_since: Option<std::time::Instant>,
+    /// A command flying from its snippet card into the dock.
+    pub flight: Option<SnippetFlight>,
+    /// Files are being dragged over the window (the file panel shows where they would go).
+    pub file_drag: bool,
     /// A `#` question being typed at a block-view prompt (tab, text with its `#`). Typed
     /// here rather than in the shell so the IME composes it like any text field.
     pub ask: Option<(TabId, String)>,
@@ -489,11 +530,28 @@ pub struct CoShell {
     /// How far along the conversation's wave is (radians): it drifts while the sheet is
     /// open and runs while a reply is coming.
     pub wave: f32,
+    /// When the light's clock last moved.
+    light_at: Option<std::time::Instant>,
     /// The tab whose conversation is open, and since when (its entrance plays from then).
     chat_opened: Option<(TabId, std::time::Instant)>,
+    /// The tab whose conversation last closed, and since when (its exit plays from then).
+    chat_closed: Option<(TabId, std::time::Instant)>,
     /// A moment of the conversation's entrance to show (tests).
     #[cfg(test)]
     pub intro_at: Option<f32>,
+    /// A moment of the conversation's exit to show (tests); none: the exit is over.
+    #[cfg(test)]
+    pub outro_at: Option<f32>,
+}
+
+/// A command on its way from its snippet card into the dock.
+pub struct SnippetFlight {
+    /// Which card it left from (it lights up meanwhile).
+    pub card: usize,
+    pub cmd: String,
+    pub from: iced::Point,
+    pub to: iced::Point,
+    pub at: std::time::Instant,
 }
 
 /// A draggable divider between panes.
@@ -603,6 +661,10 @@ pub enum Message {
     SidebarToggle,
     /// A panel's button on the dock.
     DockTab(SidebarTab),
+    /// The pointer went onto (or off) a snippet card.
+    SnippetHover(Option<usize>),
+    /// Where snippet card `usize` and the dock are on screen: the command flies between them.
+    SnippetLaunch(usize, String, Option<iced::Rectangle>, Option<iced::Rectangle>),
     /// Next step of the conversation's wave.
     WaveTick,
     /// Show / hide the status bar.
@@ -753,6 +815,8 @@ pub enum Message {
     Files(TabId, crate::files::FilesMsg),
     /// A file dragged onto the window.
     FileDropped(PathBuf),
+    /// Files are dragged over the window (true) or away from it (false).
+    FileDrag(bool),
     /// Jump chain: pick server `alias` for hop `i` (`i == len` appends).
     HostJumpPick(usize, String),
     /// Insert an empty hop after hop `i`.
@@ -974,10 +1038,21 @@ impl CoShell {
             fold_clock: None,
             scrolled_at: None,
             wave: 0.0,
+            light_at: None,
             chat_opened: None,
+            chat_closed: None,
             #[cfg(test)]
             intro_at: None,
+            #[cfg(test)]
+            outro_at: None,
             block_hover: None,
+            snippet_hover: None,
+            panel_shown: None,
+            panel_seen: None,
+            group_fold: None,
+            host_hover_since: None,
+            flight: None,
+            file_drag: false,
             ask: None,
             ask_joined: false,
             run_input: None,
@@ -1064,6 +1139,10 @@ impl CoShell {
             metas: Vec::new(),
             git: Default::default(),
             sig: None,
+            live_since: None,
+            trend: Default::default(),
+            watch: None,
+            exited_at: None,
             stats: None,
             files: crate::files::Files::default(),
             spec: Some((vec![host], app_opts(PathBuf::from("/nonexistent")))),
@@ -1456,6 +1535,7 @@ impl CoShell {
             Err(e) => (Phase::Failed(tf("셸을 시작하지 못했습니다: {0}", &[&e])), Task::none()),
         };
         if let Some(tab) = self.tab_mut(id) {
+            tab.live_since = matches!(phase, Phase::Live(_)).then(std::time::Instant::now);
             tab.phase = phase;
             tab.exited = false;
             tab.title.clear();
@@ -1522,7 +1602,16 @@ impl CoShell {
         #[cfg(test)]
         return self.intro_at.unwrap_or(1.0);
         #[cfg(not(test))]
-        self.chat_opened.map_or(1.0, |(_, at)| (at.elapsed().as_secs_f32() / CHAT_INTRO.as_secs_f32()).min(1.0))
+        self.chat_opened.map_or(1.0, |(_, at)| played(at, CHAT_INTRO))
+    }
+
+    /// The tab whose conversation is on its way out, and how far its exit has played (0 → 1).
+    /// None once it is over.
+    pub fn chat_outro(&self) -> Option<(TabId, f32)> {
+        #[cfg(test)]
+        return self.outro_at.and_then(|o| self.chat_closed.map(|(id, _)| (id, o)));
+        #[cfg(not(test))]
+        self.chat_closed.map(|(id, at)| (id, played(at, CHAT_OUTRO))).filter(|(_, o)| *o < 1.0)
     }
 
     /// Show the conversation for `id`: the chat sheet over its terminal, with the dock in
@@ -1568,7 +1657,15 @@ impl CoShell {
         if !self.settings.block_view || tab.exited || crate::blocks::alt_screen(s.term()) {
             return None;
         }
-        let sig = tab.sig.as_ref()?;
+        let Some(sig) = tab.sig.as_ref() else {
+            // No prompt seen yet: the shell is still starting (or logging in). What it prints
+            // shows as the blocks' preamble instead of the raw terminal flashing up first. A
+            // prompt that is never recognised gets the raw terminal after a while.
+            return self.awaiting_prompt(tab).then(|| crate::blocks::Screen {
+                preamble: coshell_term::styled_lines(s.term(), crate::blocks::BLOCK_ROWS),
+                ..Default::default()
+            });
+        };
         let mut screen = crate::blocks::parse(&coshell_term::styled_lines(s.term(), crate::blocks::BLOCK_ROWS), sig);
         // Spaces typed at the end ("sudo ") are cut off with the line's trailing blanks;
         // the cursor still sits after them. (At an empty prompt they can't be told from
@@ -1579,6 +1676,53 @@ impl CoShell {
             typed.extend(std::iter::repeat_n(' ', crate::blocks::cursor_gap(s.term())));
         }
         Some(screen)
+    }
+
+    /// How far the snippet cards' entrance has played (s since it began); None once over.
+    pub fn snippets_intro(&self) -> Option<f32> {
+        let n = self.snippets().len();
+        self.panel_intro(SidebarTab::Snippets).filter(|e| *e < crate::motion::stagger_len(n))
+    }
+
+    /// How far the server rows' entrance has played (s since it began); None once over.
+    pub fn servers_intro(&self) -> Option<f32> {
+        self.panel_intro(SidebarTab::Servers).filter(|e| *e < crate::motion::SLIDE_LEN)
+    }
+
+    /// Seconds since panel `tab`'s list began its entrance, while it is the one showing.
+    fn panel_intro(&self, tab: SidebarTab) -> Option<f32> {
+        #[cfg(test)]
+        return { let _ = tab; None };
+        #[cfg(not(test))]
+        self.panel_seen.as_ref().filter(|(t, _)| *t == tab).and(self.panel_shown).map(|at| at.elapsed().as_secs_f32())
+    }
+
+    /// How open server group `name` is while it folds (0 → 1); None when it is not moving.
+    pub fn group_folding(&self, name: &str) -> Option<f32> {
+        let (_, opening, at) = self.group_fold.as_ref().filter(|(g, ..)| g == name)?;
+        // Tests see a fold as done.
+        #[cfg(test)]
+        let _ = (opening, at);
+        #[cfg(test)]
+        return None;
+        #[cfg(not(test))]
+        {
+            let t = (at.elapsed().as_secs_f32() / crate::motion::FOLD).min(1.0);
+            (t < 1.0).then(|| {
+                let eased = 1.0 - (1.0 - t).powi(3);
+                if *opening { eased } else { 1.0 - eased }
+            })
+        }
+    }
+
+    /// How far the flying command is (0 → 1); None once it has landed.
+    pub fn flight_progress(&self) -> Option<f32> {
+        self.flight.as_ref().map(|f| f.at.elapsed().as_secs_f32() / crate::motion::FLIGHT).filter(|p| *p < 1.0)
+    }
+
+    /// A live tab whose shell has not shown a prompt yet, within the time a prompt takes to come.
+    pub fn awaiting_prompt(&self, tab: &Tab) -> bool {
+        tab.sig.is_none() && tab.live_since.is_some_and(|at| at.elapsed() < PROMPT_WAIT)
     }
 
     /// Keys for the shell. In block view, Enter on `# question` asks the AI instead, Enter
@@ -1688,6 +1832,7 @@ impl CoShell {
             }
             Err(e) => (Phase::Failed(tf("셸을 시작하지 못했습니다: {0}", &[&e])), Task::none()),
         };
+        let live_since = matches!(phase, Phase::Live(_)).then(std::time::Instant::now);
         self.tabs.push(Tab {
             id,
             name: coshell_term::local_shell_name(),
@@ -1708,6 +1853,10 @@ impl CoShell {
             metas: Vec::new(),
             git: Default::default(),
             sig: None,
+            live_since,
+            trend: Default::default(),
+            watch: None,
+            exited_at: None,
             stats: None,
             files: crate::files::Files::default(),
             spec: None,
@@ -1746,6 +1895,10 @@ impl CoShell {
             metas: Vec::new(),
             git: Default::default(),
             sig: None,
+            live_since: None,
+            trend: Default::default(),
+            watch: None,
+            exited_at: None,
             stats: None,
             files: crate::files::Files::default(),
             spec: Some((chain, opts)),
@@ -1763,6 +1916,7 @@ impl CoShell {
         tab.exited = false;
         tab.prompt = None;
         tab.conn = None;
+        tab.watch = None;
         tab.files.reset();
         tab.tunnels.clear();
         tab.save_passwords.clear();
@@ -1879,10 +2033,34 @@ impl CoShell {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
-        // The conversation just opened for a tab (however it was opened): its entrance starts now.
+        // The conversation just opened or closed for a tab (however that came about): its
+        // entrance or exit starts now. One that turns back half way goes back from where it got to.
         let chatting = self.ask.as_ref().map(|(id, _)| *id);
-        if chatting != self.chat_opened.map(|(id, _)| id) {
-            self.chat_opened = chatting.map(|id| (id, std::time::Instant::now()));
+        let was = self.chat_opened.map(|(id, _)| id);
+        if chatting != was {
+            let now = std::time::Instant::now();
+            if let Some((old, at)) = self.chat_opened {
+                self.chat_closed = Some((old, now - CHAT_OUTRO.mul_f32(1.0 - played(at, CHAT_INTRO))));
+            }
+            self.chat_opened = chatting.map(|id| match self.chat_closed {
+                Some((closing, at)) if closing == id => {
+                    self.chat_closed = None;
+                    (id, now - CHAT_INTRO.mul_f32(1.0 - played(at, CHAT_OUTRO)))
+                }
+                _ => (id, now),
+            });
+        }
+        // The orb holds the conversation's wave: it rolls while the conversation is open, and
+        // speaks while a reply comes.
+        self.face.turn = (self.wave * 100.0) as u16;
+        self.face.voice = self.active_tab().is_some_and(|t| t.chat.is_streaming());
+        // The side panel's list makes its entrance when a panel comes on screen or the search changes.
+        let panel = self.settings.sidebar_open.then(|| (self.sidebar_tab, self.host_filter.clone()));
+        if panel != self.panel_seen {
+            if panel.is_some() {
+                self.panel_shown = Some(std::time::Instant::now());
+            }
+            self.panel_seen = panel;
         }
         // Whatever just happened may have put a connected tab's file panel on screen.
         Task::batch([task, self.ensure_files()])
@@ -1892,7 +2070,14 @@ impl CoShell {
         match message {
             Message::Conn(id, ev) => self.on_conn(id, ev),
             Message::Files(id, m) => self.update_files(id, m),
-            Message::FileDropped(path) => self.drop_file(path),
+            Message::FileDropped(path) => {
+                self.file_drag = false;
+                self.drop_file(path)
+            }
+            Message::FileDrag(over) => {
+                self.file_drag = over;
+                Task::none()
+            }
             Message::Term(id, ev) => {
                 if let Some(tab) = self.tab_mut(id) {
                     match ev {
@@ -1911,9 +2096,11 @@ impl CoShell {
                         TermEvent::Bell => {}
                         TermEvent::Exited => {
                             tab.exited = true;
+                            tab.exited_at = Some(std::time::Instant::now());
                             // The connection is gone with the shell; so are its forwards.
                             tab.tunnels.clear();
                             tab.conn = None;
+                            tab.watch = None;
                             tab.files.reset();
                         }
                     }
@@ -2104,6 +2291,13 @@ impl CoShell {
             Message::WaveTick => {
                 let busy = self.active_tab().is_some_and(|t| t.chat.is_streaming());
                 self.wave = (self.wave + if busy { WAVE_STEP_BUSY } else { WAVE_STEP }) % WAVE_PERIOD;
+                // The light's own clock runs on real time, and its voice eases in and out.
+                let now = std::time::Instant::now();
+                let dt = self.light_at.map_or(0.0, |was| (now - was).as_secs_f32().min(0.1));
+                self.light_at = Some(now);
+                self.face.at = (self.face.at + dt) % LIGHT_PERIOD;
+                let to = if busy { 1.0 } else { 0.0 };
+                self.face.level += (to - self.face.level) * (1.0 - (-dt / VOICE_EASE).exp());
                 Task::none()
             }
             // The dock: a panel's button opens it, and closes it when it is the one showing.
@@ -2116,18 +2310,49 @@ impl CoShell {
                 self.update(Message::SidebarTab(t))
             }
             Message::GroupToggle(g) => {
-                match self.collapsed_groups.iter().position(|x| *x == g) {
+                let opening = match self.collapsed_groups.iter().position(|x| *x == g) {
                     Some(i) => {
                         self.collapsed_groups.remove(i);
+                        true
                     }
-                    None => self.collapsed_groups.push(g),
-                }
+                    None => {
+                        self.collapsed_groups.push(g.clone());
+                        false
+                    }
+                };
+                self.group_fold = Some((g, opening, std::time::Instant::now()));
                 Task::none()
             }
             Message::Snippet(i, run) => match self.snippets().get(i) {
-                Some(sn) => self.type_into_terminal(&sn.cmd, run),
+                Some(sn) => {
+                    let cmd = sn.cmd.clone();
+                    let typed = self.type_into_terminal(&cmd, run);
+                    // Where the card and the dock are, for the command's flight between them.
+                    let bounds = |id: String| iced::widget::selector::find(iced::widget::Id::from(id)).map(|t| t.and_then(|t| t.visible_bounds()));
+                    let launch = bounds(crate::ui_sidebar::snippet_card_id(i))
+                        .then(move |card| bounds(crate::ui_term::DOCK.to_string()).map(move |dock| (card, dock)))
+                        .map(move |(card, dock)| Message::SnippetLaunch(i, cmd.clone(), card, dock));
+                    Task::batch([typed, launch])
+                }
                 None => Task::none(),
             },
+            Message::SnippetHover(h) => {
+                if h != self.snippet_hover.map(|(i, _)| i) {
+                    self.snippet_hover = h.map(|i| (i, std::time::Instant::now()));
+                }
+                Task::none()
+            }
+            Message::SnippetLaunch(card, cmd, from, to) => {
+                // Without the card on screen there is nothing to fly from. Without the dock
+                // (a full-screen program has the terminal) it lands at the terminal's foot.
+                let Some(from) = from else { return Task::none() };
+                let to = to.map_or_else(
+                    || iced::Point::new(self.settings.window.width / 2.0, self.settings.window.height - 60.0),
+                    |d| iced::Point::new(d.x + 72.0, d.center_y()),
+                );
+                self.flight = Some(SnippetFlight { card, cmd, from: from.center(), to, at: std::time::Instant::now() });
+                Task::none()
+            }
             Message::SnippetNew => {
                 self.snippet_editor = Some(SnippetEditor::default());
                 Task::none()
@@ -2167,19 +2392,37 @@ impl CoShell {
                 Task::none()
             }
             Message::StatsTick => {
-                let Some(t) = self.live_tab() else { return Task::none() };
-                let id = t.id;
-                match (&t.conn, t.is_local()) {
-                    (Some(c), false) => Task::perform(crate::metrics::remote(c.clone()), move |r| Message::Stats(id, r)),
-                    (_, true) => Task::perform(crate::metrics::local(), move |r| Message::Stats(id, r)),
-                    _ => Task::none(),
+                // Every connected server is watched over one channel of its own, started here
+                // (and started again if it ended). This computer is asked while it is in front.
+                let mut tasks = Vec::new();
+                for t in self.tabs.iter_mut().filter(|t| matches!(t.phase, Phase::Live(_)) && !t.exited && t.watch.is_none()) {
+                    if let (Some(c), false) = (&t.conn, t.is_local()) {
+                        let id = t.id;
+                        let (task, handle) = Task::run(crate::metrics::watch(c.clone()), move |r| Message::Stats(id, r)).abortable();
+                        t.watch = Some(handle.abort_on_drop());
+                        tasks.push(task);
+                    }
                 }
+                if let Some(id) = self.live_tab().filter(|t| t.is_local()).map(|t| t.id) {
+                    tasks.push(Task::perform(crate::metrics::local(), move |r| Message::Stats(id, r)));
+                }
+                Task::batch(tasks)
             }
             Message::Stats(id, r) => {
+                // A watch that ended: the next tick starts another, if the server is still there.
+                // One that never gave a reading is left be (not a system it can read, or the
+                // server allows no more channels): asking again every tick would only pester it.
+                if let (Some(t), Err(e)) = (self.tab_mut(id), &r)
+                    && e == crate::metrics::WATCH_ENDED
+                {
+                    t.watch = None;
+                }
                 if let (Some(t), Ok(st)) = (self.tab_mut(id), r) {
                     // The OS name is read once; keep it when a later poll misses it.
                     let os = st.os.clone().or_else(|| t.stats.as_ref().and_then(|o| o.os.clone()));
-                    t.stats = Some(crate::metrics::Stats { os, ..st });
+                    let st = crate::metrics::Stats { os, ..st };
+                    t.trend.push(t.stats.as_ref(), &st);
+                    t.stats = Some(st);
                 }
                 Task::none()
             }
@@ -2360,6 +2603,9 @@ impl CoShell {
                 Task::none()
             }
             Message::Retry(id) => {
+                if let Some(t) = self.tab_mut(id) {
+                    t.exited_at = None;
+                }
                 if self.tabs.iter().any(|t| t.id == id && t.is_local()) {
                     self.restart_local(id)
                 } else {
@@ -2661,6 +2907,9 @@ impl CoShell {
             }
             Message::HostHover(a, inside) => {
                 if inside {
+                    if self.host_hover.as_deref() != Some(a.as_str()) {
+                        self.host_hover_since = Some(std::time::Instant::now());
+                    }
                     self.host_hover = Some(a);
                 } else if self.host_hover.as_deref() == Some(a.as_str()) {
                     // Only this row's own exit clears it: the next row's enter may come first.
@@ -3295,6 +3544,7 @@ impl CoShell {
                         session.configure(scrollback, cursor);
                         let (phase, task) = live(id, session);
                         tab.phase = phase;
+                        tab.live_since = Some(std::time::Instant::now());
                         let forwards = tab.auto_forwards.clone();
                         // Only passwords that just worked are kept.
                         if let Some(e) = save.iter().find_map(|(key, pw)| self.passwords.set(key, pw).err()) {
@@ -3557,7 +3807,7 @@ impl CoShell {
         } else {
             Subscription::none()
         };
-        let stats = if self.live_tab().is_some() {
+        let stats = if self.tabs.iter().any(|t| matches!(t.phase, Phase::Live(_)) && !t.exited) {
             iced::time::every(crate::metrics::POLL_EVERY).map(|_| Message::StatsTick)
         } else {
             Subscription::none()
@@ -3598,12 +3848,36 @@ impl CoShell {
             }
             _ => Subscription::none(),
         };
-        // The wave lives only while the conversation is on screen.
-        // Every frame while it makes its entrance, then at the wave's own pace.
-        let wave = match (chat_shown, self.chat_intro() < 1.0) {
-            (true, true) => iced::window::frames().map(|_| Message::WaveTick),
-            (true, false) => iced::time::every(WAVE_TICK).map(|_| Message::WaveTick),
-            (false, _) => Subscription::none(),
+        // The light is always alive: every frame while the conversation is on screen (or on
+        // its way in or out), and at an easier pace for the small orbs the rest of the time.
+        let leaving = self.chat_outro().is_some_and(|(id, _)| Some(id) == self.active);
+        let wave = if chat_shown || self.chat_intro() < 1.0 || leaving {
+            iced::window::frames().map(|_| Message::WaveTick)
+        } else {
+            iced::time::every(WAVE_TICK).map(|_| Message::WaveTick)
+        };
+        // Every frame while cards pop in or a command flies; while a card is lit its edge turns.
+        let files_moving = self.settings.sidebar_open && self.sidebar_tab == SidebarTab::Files && self.active_tab().is_some_and(|t| t.files.animating());
+        let servers = self.settings.sidebar_open && self.sidebar_tab == SidebarTab::Servers;
+        let servers_moving = servers && (self.servers_intro().is_some() || self.group_fold.as_ref().is_some_and(|(g, ..)| self.group_folding(g).is_some()));
+        // The bars glide to a new reading.
+        let gliding = self.settings.sidebar_open && self.active_tab().is_some_and(|t| t.trend.glide() < 1.0);
+        // A connected or connecting server's dot keeps pulsing while the list is on screen.
+        let pulsing = servers && self.tabs.iter().any(|t| t.alias.is_some() && !t.exited && matches!(t.phase, Phase::Live(_) | Phase::Connecting));
+        // Connecting: the route's light runs. Just ended: the banner slides in.
+        let connecting = self.active_tab().is_some_and(|t| matches!(t.phase, Phase::Connecting));
+        let ending = self.active_tab().and_then(|t| t.exited_at).is_some_and(|at| at.elapsed() < crate::ui::BANNER_IN);
+        let motion = if self.snippets_intro().is_some() || self.flight_progress().is_some() || files_moving || servers_moving || gliding || connecting || ending {
+            iced::window::frames().map(|_| Message::Tick)
+        } else if self.snippet_hover.is_some() || (servers && self.host_hover.is_some()) || pulsing {
+            iced::time::every(SNIPPET_GLOW_TICK).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        };
+        let starting = if self.settings.block_view && self.tabs.iter().any(|t| self.awaiting_prompt(t)) {
+            iced::time::every(PROMPT_WAIT_TICK).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
         };
         let branch = if self.settings.block_view && self.live_tab().is_some() { iced::time::every(crate::branch::EVERY).map(|_| Message::BranchTick) } else { Subscription::none() };
         // Coarse while the bar just stays; every frame while it fades.
@@ -3612,7 +3886,7 @@ impl CoShell {
             Some(_) => iced::time::every(SCROLLBAR_TICK).map(|_| Message::ScrollbarTick),
             None => Subscription::none(),
         };
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow, scrollbar, branch, wave])
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow, scrollbar, branch, wave, starting, motion])
     }
 }
 
@@ -3635,6 +3909,8 @@ fn on_event(ev: Event, _status: event::Status, _window: window::Id) -> Option<Me
     let (key, modifiers, physical_key) = match ev {
         Event::Window(window::Event::Resized(size)) => return Some(Message::WindowResized(size)),
         Event::Window(window::Event::FileDropped(path)) => return Some(Message::FileDropped(path)),
+        Event::Window(window::Event::FileHovered(_)) => return Some(Message::FileDrag(true)),
+        Event::Window(window::Event::FilesHoveredLeft) => return Some(Message::FileDrag(false)),
         Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, physical_key, .. }) => (key, modifiers, physical_key),
         _ => return None,
     };

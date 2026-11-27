@@ -4,11 +4,10 @@
 
 use std::time::{Duration, Instant};
 
-/// How often the active session is polled.
-pub const POLL_EVERY: Duration = Duration::from_secs(5);
+/// How often this computer is asked for its figures (servers send theirs: see `watch`).
+pub const POLL_EVERY: Duration = Duration::from_secs(2);
 /// A poll that takes longer than this is dropped.
 const POLL_TIMEOUT: Duration = Duration::from_secs(8);
-const OUTPUT_LIMIT: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
@@ -22,39 +21,134 @@ pub struct Stats {
     pub latency_ms: Option<u64>,
 }
 
-/// Two CPU samples half a second apart, memory, the disk holding /var, and the OS name (Linux).
-const LINUX_SCRIPT: &str = "head -n1 /proc/stat; sleep 0.5; head -n1 /proc/stat; \
-grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; df -P /var 2>/dev/null | tail -n1; \
-. /etc/os-release 2>/dev/null && echo \"OS=$PRETTY_NAME\"";
+/// How much time the resource card's graph shows (s).
+pub const TREND_SPAN: f32 = 60.0;
+/// How far behind now the graph's right edge is (s): longer than readings take to come, so
+/// the next one is always there before the edge reaches it and the graph never waits. A
+/// server sends one a second; this computer is asked every `POLL_EVERY` and takes a second
+/// to answer.
+pub fn trend_delay(local: bool) -> f32 {
+    if local { 3.5 } else { 1.8 }
+}
+/// How many readings the graph keeps: what it shows, and a few either side of it.
+pub const TREND_LEN: usize = 68;
+/// How long the bars take to move to a new reading (s).
+#[cfg_attr(test, allow(dead_code))]
+pub const GLIDE: f32 = 0.6;
+
+/// What the resource card remembers between readings: the last few CPU and memory figures,
+/// and the reading before the latest with when the latest came, so the bars glide over.
+#[derive(Debug, Default, Clone)]
+pub struct Trend {
+    pub cpu: std::collections::VecDeque<u8>,
+    pub mem: std::collections::VecDeque<u8>,
+    /// When each reading came.
+    pub times: std::collections::VecDeque<std::time::Instant>,
+    /// CPU, memory, disk before the latest reading.
+    pub before: Option<(u8, u8, u8)>,
+    pub at: Option<std::time::Instant>,
+}
+
+impl Trend {
+    /// A new reading came in; `last` is the one it replaces.
+    pub fn push(&mut self, last: Option<&Stats>, new: &Stats) {
+        for (q, v) in [(&mut self.cpu, new.cpu), (&mut self.mem, new.mem)] {
+            q.push_back(v);
+            if q.len() > TREND_LEN {
+                q.pop_front();
+            }
+        }
+        let now = std::time::Instant::now();
+        self.times.push_back(now);
+        if self.times.len() > TREND_LEN {
+            self.times.pop_front();
+        }
+        self.before = last.map(|s| (s.cpu, s.mem, s.disk));
+        self.at = Some(now);
+    }
+
+    /// How long ago each reading came (s), oldest first. The graph places readings by their
+    /// age, so it runs on at one steady pace whenever they happen to arrive.
+    pub fn ages(&self) -> Vec<f32> {
+        // In tests: as if they came exactly on time, the newest just reaching the edge.
+        #[cfg(test)]
+        return (0..self.times.len()).rev().map(|i| trend_delay(false) + i as f32).collect();
+        #[cfg(not(test))]
+        self.times.iter().map(|t| t.elapsed().as_secs_f32()).collect()
+    }
+
+    /// How far the bars have moved from the reading before to the latest (0 → 1).
+    pub fn glide(&self) -> f32 {
+        #[cfg(test)]
+        return 1.0;
+        #[cfg(not(test))]
+        self.at.map_or(1.0, |at| (at.elapsed().as_secs_f32() / GLIDE).min(1.0))
+    }
+}
+
+/// A reading a second, for as long as someone is listening (Linux): the OS name once, then
+/// each second the CPU counters and memory (and every tenth second the disk holding /var),
+/// closed by a line of `--`.
+///
+/// It stops by itself: when the channel closes its output has nowhere to go and the next
+/// line it prints ends it, and it never runs longer than an hour in any case (the watcher
+/// starts it again).
+const WATCH_SCRIPT: &str = ". /etc/os-release 2>/dev/null; echo \"OS=$PRETTY_NAME\"; i=0; \
+while [ $i -lt 3600 ]; do \
+head -n1 /proc/stat || exit; \
+grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; \
+[ $((i % 10)) -eq 0 ] && df -P /var 2>/dev/null | tail -n1; \
+echo -- || exit; i=$((i+1)); sleep 1; done";
+/// What a watch says when it ends after having given readings (so it is worth starting again).
+pub const WATCH_ENDED: &str = "ended";
+/// The round trip is timed once in this many readings.
+const LATENCY_EVERY: u32 = 10;
+/// A line of output longer than this is not ours: stop listening.
+const LINE_LIMIT: usize = 64 * 1024;
 
 fn pct(used: f64, total: f64) -> u8 {
     if total <= 0.0 { 0 } else { (used / total * 100.0).round().clamp(0.0, 100.0) as u8 }
 }
 
-/// Output of [`LINUX_SCRIPT`].
-pub fn parse_linux(out: &str) -> Option<Stats> {
-    let cpu_lines: Vec<Vec<u64>> = out
-        .lines()
-        .filter(|l| l.starts_with("cpu "))
-        .map(|l| l.split_whitespace().skip(1).filter_map(|n| n.parse().ok()).collect())
-        .collect();
-    let mut s = Stats::default();
-    if let [a, b] = cpu_lines.as_slice() {
+/// Turns the watcher's output into readings: CPU is what was busy between one second's
+/// counters and the next's, and what is only said now and then (the OS, the disk) is kept.
+#[derive(Default)]
+pub struct Sampler {
+    /// The CPU counters a second ago.
+    counters: Option<Vec<u64>>,
+    disk: Option<(u8, String)>,
+    os: Option<String>,
+}
+
+impl Sampler {
+    /// One second's lines (what came before a `--`). `None` until there is a second to
+    /// compare with, or when the lines are not what the script prints.
+    pub fn feed(&mut self, block: &str) -> Option<Stats> {
+        if let Some(os) = block.lines().find_map(|l| l.strip_prefix("OS=")).map(|o| o.trim().to_string()).filter(|o| !o.is_empty()) {
+            self.os = Some(os);
+        }
+        let mut s = Stats::default();
+        disk_line(block, &mut s);
+        if !s.disk_mount.is_empty() {
+            self.disk = Some((s.disk, s.disk_mount.clone()));
+        }
+        let kb = |key: &str| block.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse::<f64>().ok());
+        let (total, avail) = (kb("MemTotal:")?, kb("MemAvailable:")?);
+        s.mem = pct(total - avail, total);
+        let now: Vec<u64> = block.lines().find(|l| l.starts_with("cpu "))?.split_whitespace().skip(1).filter_map(|n| n.parse().ok()).collect();
+        let before = self.counters.replace(now.clone())?;
         // idle + iowait count as idle
         let idle = |v: &[u64]| v.get(3).copied().unwrap_or(0) + v.get(4).copied().unwrap_or(0);
         let total = |v: &[u64]| v.iter().sum::<u64>();
-        let dt = total(b).saturating_sub(total(a)) as f64;
-        let di = idle(b).saturating_sub(idle(a)) as f64;
+        let dt = total(&now).saturating_sub(total(&before)) as f64;
+        let di = idle(&now).saturating_sub(idle(&before)) as f64;
         s.cpu = pct(dt - di, dt);
+        if let Some((disk, mount)) = &self.disk {
+            (s.disk, s.disk_mount) = (*disk, mount.clone());
+        }
+        s.os = self.os.clone();
+        Some(s)
     }
-    let kb = |key: &str| {
-        out.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse::<f64>().ok())
-    };
-    let (total, avail) = (kb("MemTotal:")?, kb("MemAvailable:")?);
-    s.mem = pct(total - avail, total);
-    disk_line(out, &mut s);
-    s.os = out.lines().find_map(|l| l.strip_prefix("OS=")).map(|o| o.trim().to_string()).filter(|o| !o.is_empty());
-    Some(s)
 }
 
 /// The `df -P` data line: `fs blocks used avail capacity% mount`.
@@ -65,19 +159,52 @@ fn disk_line(out: &str, s: &mut Stats) {
     }
 }
 
-/// Poll a server over its SSH connection.
-pub async fn remote(conn: coshell_ssh::Connection) -> Result<Stats, String> {
-    let run = async {
-        let start = Instant::now();
-        conn.exec(":", 64).await.map_err(|e| e.to_string())?;
-        let rtt = start.elapsed();
-        let out = conn.exec(LINUX_SCRIPT, OUTPUT_LIMIT).await.map_err(|e| e.to_string())?;
-        let mut s = parse_linux(&String::from_utf8_lossy(&out.output)).ok_or_else(|| "unsupported system".to_string())?;
-        // Opening a channel and running the command are two round trips.
-        s.latency_ms = Some((rtt.as_millis() / 2) as u64);
-        Ok(s)
-    };
-    tokio::time::timeout(POLL_TIMEOUT, run).await.map_err(|_| "timeout".to_string())?
+/// Watch a server over its SSH connection: one channel kept open, a reading a second.
+/// Ends with an `Err` when the channel closes (the connection went, or the hour was up).
+pub fn watch(conn: coshell_ssh::Connection) -> impl iced::futures::Stream<Item = Result<Stats, String>> {
+    iced::stream::channel(16, async move |mut out: iced::futures::channel::mpsc::Sender<Result<Stats, String>>| {
+        use iced::futures::SinkExt;
+        let mut stream = match conn.exec_stream(WATCH_SCRIPT).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = out.send(Err(e.to_string())).await;
+                return;
+            }
+        };
+        let mut sampler = Sampler::default();
+        let (mut pending, mut block) = (String::new(), String::new());
+        let (mut latency, mut readings) = (None, 0u32);
+        'listen: while let Some(bytes) = stream.next().await {
+            pending.push_str(&String::from_utf8_lossy(&bytes));
+            if pending.len() > LINE_LIMIT || block.len() > LINE_LIMIT {
+                break;
+            }
+            while let Some(end) = pending.find('\n') {
+                let line: String = pending.drain(..=end).collect();
+                if line.trim() != "--" {
+                    block.push_str(&line);
+                    continue;
+                }
+                let reading = sampler.feed(&block);
+                block.clear();
+                let Some(mut s) = reading else { continue };
+                // Now and then, how long a round trip takes: opening a channel and running
+                // a command that does nothing are two of them.
+                if readings % LATENCY_EVERY == 0 {
+                    let start = Instant::now();
+                    if let Ok(Ok(_)) = tokio::time::timeout(POLL_TIMEOUT, conn.exec(":", 64)).await {
+                        latency = Some((start.elapsed().as_millis() / 2) as u64);
+                    }
+                }
+                readings = readings.wrapping_add(1);
+                s.latency_ms = latency;
+                if out.send(Ok(s)).await.is_err() {
+                    break 'listen;
+                }
+            }
+        }
+        let _ = out.send(Err(if readings > 0 { WATCH_ENDED.into() } else { "nothing to read".to_string() })).await;
+    })
 }
 
 /// Poll this computer.
@@ -173,19 +300,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linux_output_parses() {
-        let out = "cpu  100 0 100 700 100 0 0 0 0 0\n\
-cpu  150 0 150 750 100 0 0 0 0 0\n\
-MemTotal:       16000000 kB\n\
-MemAvailable:    6000000 kB\n\
-/dev/sda2         83886080 76546048 7340032      91% /var\n\
-OS=Ubuntu 22.04.4 LTS\n";
-        let s = parse_linux(out).unwrap();
-        assert_eq!(s.cpu, 67, "100 busy of 150 ticks");
+    fn a_servers_readings_come_from_one_second_and_the_next() {
+        let mut w = Sampler::default();
+        let first = "OS=Ubuntu 22.04.4 LTS\ncpu  100 0 100 700 100 0 0 0 0 0\n\
+MemTotal:       16000000 kB\nMemAvailable:    6000000 kB\n\
+/dev/sda2         83886080 76546048 7340032      91% /var\n";
+        assert_eq!(w.feed(first), None, "nothing to compare the counters with yet");
+        // A second later: 100 of 150 ticks were busy. The disk and the OS are not said again.
+        let s = w.feed("cpu  150 0 150 740 110 0 0 0 0 0\nMemTotal:       16000000 kB\nMemAvailable:    6000000 kB\n").unwrap();
+        assert_eq!(s.cpu, 67);
         assert_eq!(s.mem, 63);
-        assert_eq!((s.disk, s.disk_mount.as_str()), (91, "/var"));
+        assert_eq!((s.disk, s.disk_mount.as_str()), (91, "/var"), "kept from when it was last said");
         assert_eq!(s.os.as_deref(), Some("Ubuntu 22.04.4 LTS"));
-        assert!(parse_linux("garbage").is_none());
+        // An idle second.
+        let s = w.feed("cpu  150 0 150 840 110 0 0 0 0 0\nMemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n").unwrap();
+        assert_eq!((s.cpu, s.mem), (0, 50));
+        assert_eq!(w.feed("garbage"), None);
+    }
+
+    #[test]
+    fn the_watcher_stops_by_itself() {
+        // Bounded, and every turn of the loop prints (so a closed channel ends it).
+        assert!(WATCH_SCRIPT.contains("-lt 3600") && WATCH_SCRIPT.contains("echo -- || exit") && WATCH_SCRIPT.contains("sleep 1"));
     }
 
     #[test]

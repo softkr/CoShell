@@ -9,9 +9,9 @@ use crate::app::{CoShell, Message, Tab, TabId};
 use crate::context_menu::ContextMenu;
 use crate::files::{FileConfirm, FileInput, Files, FilesMsg, Link, Transfer, TransferState};
 use crate::i18n::{tf, tr};
-use crate::icons::{ARROW_UP, DOWNLOAD, EXTERNAL_LINK, FILE, FOLDER, FOLDER_PLUS, PENCIL, REFRESH, UPLOAD, X};
+use crate::icons::{ARROW_UP, CHEVRON_RIGHT, DOWNLOAD, EXTERNAL_LINK, FILE, FILE_ARCHIVE, FILE_CODE, FILE_CONFIG, FILE_IMAGE, FILE_TERMINAL, FILE_TEXT, FOLDER, FOLDER_PLUS, KEY, PENCIL, REFRESH, UPLOAD, X};
 use crate::theme::{self, alpha};
-use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn, btn_style, card_style, input_style, mono, muted};
+use crate::ui::{Btn, El, R_CARD, R_CONTROL, SEMIBOLD, btn, btn_style, card_style, input_style, muted};
 
 /// Width of an entry's right-click menu.
 const MENU_W: f32 = 150.0;
@@ -21,6 +21,81 @@ pub const FILE_INPUT: &str = "file-panel-input";
 /// Finished transfers and edits scroll beyond this so the folder keeps most of the panel.
 const ACTIVITY_MAX_H: f32 = 190.0;
 const BYTES_PER_UNIT: f64 = 1024.0;
+/// Width of the light round the panel while files are dragged over the window.
+const DROP_GLOW_W: f32 = 1.5;
+
+type Icon = &'static std::sync::LazyLock<iced::widget::svg::Handle>;
+
+/// How an entry is drawn: its icon and colour by what it is (a folder, code, settings, a key…).
+pub fn file_look(e: &FileEntry) -> (Icon, Color) {
+    if e.kind == FileKind::Dir {
+        return (&FOLDER, theme::ACCENT_TX);
+    }
+    let name = e.name.to_lowercase();
+    let ext = name.rsplit_once('.').map_or("", |(stem, ext)| if stem.is_empty() { "" } else { ext });
+    let keys = ["id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys", "known_hosts"];
+    if keys.iter().any(|k| name.starts_with(k)) || matches!(ext, "pem" | "key" | "crt" | "cer" | "pub" | "p12" | "pfx") {
+        return (&KEY, theme::AMBER_300);
+    }
+    match ext {
+        "rs" | "py" | "js" | "mjs" | "ts" | "tsx" | "jsx" | "go" | "java" | "kt" | "c" | "h" | "cc" | "cpp" | "hpp" | "rb" | "php" | "swift" | "lua" | "pl" | "cs" | "scala" | "sql" | "html" | "css" | "vue" => (&FILE_CODE, theme::BLUE),
+        "sh" | "bash" | "zsh" | "fish" | "command" | "bat" | "ps1" => (&FILE_TERMINAL, theme::GREEN),
+        "conf" | "cfg" | "ini" | "yml" | "yaml" | "toml" | "json" | "xml" | "env" | "properties" | "service" | "timer" | "plist" => (&FILE_CONFIG, theme::ORANGE),
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "deb" | "rpm" | "jar" | "whl" => (&FILE_ARCHIVE, theme::PURPLE),
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "bmp" | "tif" | "tiff" | "heic" => (&FILE_IMAGE, theme::TEAL),
+        "log" | "txt" | "md" | "out" | "csv" | "tsv" | "err" | "rst" => (&FILE_TEXT, theme::TEXT_2),
+        // A shell's own settings: `.bashrc`, `.profile`, `.vimrc`, `.gitconfig`.
+        _ if name.starts_with('.') && (name.ends_with("rc") || name.ends_with("profile") || name.ends_with("config") || name.ends_with("_logout")) => (&FILE_CONFIG, theme::ORANGE),
+        // Anything its owner may run.
+        _ if e.permissions.is_some_and(|m| m & 0o100 != 0) => (&FILE_TERMINAL, theme::GREEN),
+        _ => (&FILE, theme::TEXT_3),
+    }
+}
+
+/// The folder as steps to click: `~` for home, then each folder on the way. Each step is
+/// (what it shows, the folder it opens).
+pub fn crumbs(path: &str, home: &str) -> Vec<(String, String)> {
+    let (mut out, rest, mut at) = match path.strip_prefix(home).filter(|r| !home.is_empty() && home != "/" && (r.is_empty() || r.starts_with('/'))) {
+        Some(rest) => (vec![("~".to_string(), home.to_string())], rest, home.to_string()),
+        None => (vec![("/".to_string(), "/".to_string())], path, String::new()),
+    };
+    for part in rest.split('/').filter(|p| !p.is_empty()) {
+        at = format!("{at}/{part}");
+        out.push((part.to_string(), at.clone()));
+    }
+    out
+}
+
+fn breadcrumb(id: TabId, f: &Files) -> El<'_> {
+    let steps = crumbs(&f.path, &f.home);
+    let last = steps.len() - 1;
+    let mut r = row![].spacing(2).align_y(Alignment::Center);
+    for (i, (label, to)) in steps.into_iter().enumerate() {
+        if i > 0 {
+            r = r.push(crate::icons::tinted(&CHEVRON_RIGHT, 10.0, theme::TEXT_3));
+        }
+        let here = i == last;
+        let step = button(text(label).size(11.5).font(if here { crate::fonts::weight(crate::fonts::MONO, iced::font::Weight::Bold) } else { crate::fonts::MONO }).wrapping(text::Wrapping::None))
+            .padding([2, 5])
+            .on_press_maybe((!here).then(|| msg(id, FilesMsg::Go(to))))
+            .style(move |_, st| {
+                let hover = !here && matches!(st, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: hover.then_some(Background::Color(alpha(Color::WHITE, 0.08))),
+                    text_color: if here { theme::TEXT } else if hover { theme::ACCENT_TX } else { theme::TEXT_2 },
+                    border: Border { radius: 6.0.into(), ..Default::default() },
+                    ..Default::default()
+                }
+            });
+        r = r.push(step);
+    }
+    // A deep folder keeps its end in view: the steps scroll, starting at the right.
+    iced::widget::scrollable(r)
+        .direction(iced::widget::scrollable::Direction::Horizontal(iced::widget::scrollable::Scrollbar::new().width(0).scroller_width(0)))
+        .anchor_right()
+        .width(Length::Fill)
+        .into()
+}
 
 /// `1.4 MB`, `812 B`.
 pub fn human_size(bytes: u64) -> String {
@@ -87,14 +162,14 @@ pub fn panel(app: &CoShell) -> El<'_> {
                 .spacing(10)
                 .align_x(Alignment::Center),
         ),
-        Link::Ready => ready(id, f),
+        Link::Ready => ready(app, id, f),
     }
 }
 
-fn ready(id: TabId, f: &Files) -> El<'_> {
+fn ready<'a>(app: &'a CoShell, id: TabId, f: &'a Files) -> El<'a> {
     let path_bar = row![
         icon_btn(&ARROW_UP, tr("상위 폴더"), (f.path != "/").then(|| msg(id, FilesMsg::Up))),
-        container(mono(f.path.clone(), 11.5, theme::TEXT)).width(Length::Fill).clip(true),
+        breadcrumb(id, f),
         icon_btn(&REFRESH, tr("새로 고침"), Some(msg(id, FilesMsg::Refresh))),
     ]
     .spacing(8)
@@ -116,8 +191,17 @@ fn ready(id: TabId, f: &Files) -> El<'_> {
     }
 
     let mut list = column![].spacing(1);
-    for e in &f.entries {
-        list = list.push(entry_row(id, f, e));
+    // A folder just opened slides in from the side it was entered from, a row at a time.
+    let moved = f.moved_since();
+    for (i, e) in f.entries.iter().enumerate() {
+        let row = entry_row(id, f, e);
+        list = list.push(match moved {
+            Some((elapsed, side)) => {
+                let left = crate::motion::slide(elapsed, i);
+                crate::motion::Shift::new(row, 1.0, iced::Vector::new(side * crate::motion::SLIDE_PX * left, 0.0), left < 1.0).into()
+            }
+            None => row,
+        });
     }
     if f.entries.is_empty() {
         list = list.push(centered(muted(if f.loading { tr("불러오는 중…") } else { tr("빈 폴더입니다") })));
@@ -132,7 +216,33 @@ fn ready(id: TabId, f: &Files) -> El<'_> {
     if !f.transfers.is_empty() || !f.edits.is_empty() {
         col = col.push(crate::ui::rule(true)).push(container(crate::ui::scroll(container(activity(id, f)).padding([8, 12]))).max_height(ACTIVITY_MAX_H));
     }
-    col.into()
+    if !app.file_drag {
+        return col.into();
+    }
+    // Files are being dragged over the window: the panel lights up and says where they will go.
+    let hint = container(
+        row![crate::icons::tinted(&UPLOAD, 13.0, theme::ACCENT_TX), text(tf("놓으면 {0}에 올라갑니다", &[&f.path])).size(11.5).color(theme::TEXT).wrapping(text::Wrapping::None)]
+            .spacing(7)
+            .align_y(Alignment::Center),
+    )
+    .padding([7, 12])
+    .clip(true)
+    .width(Length::Fill)
+    .style(|_| container::Style { background: Some(Background::Color(alpha(theme::ACCENT, 0.16))), ..Default::default() });
+    let inner = container(column![hint, col]).width(Length::Fill).height(Length::Fill).style(|_| container::Style {
+        background: Some(Background::Color(theme::BG_1)),
+        border: Border { radius: (R_CARD - DROP_GLOW_W).into(), ..Default::default() },
+        ..Default::default()
+    });
+    let edge = iced::gradient::Linear::new(iced::Radians(2.2)).add_stop(0.0, theme::PURPLE).add_stop(0.5, theme::BLUE).add_stop(1.0, theme::TEAL);
+    container(container(inner).padding(DROP_GLOW_W).style(move |_| container::Style {
+        background: Some(Background::Gradient(edge.into())),
+        border: Border { radius: R_CARD.into(), ..Default::default() },
+        shadow: iced::Shadow { color: alpha(theme::BLUE, 0.35), offset: iced::Vector::ZERO, blur_radius: 18.0 },
+        ..Default::default()
+    }))
+    .padding([0, 6])
+    .into()
 }
 
 /// "Follow the terminal": the panel shows the folder the shell is in.
@@ -171,14 +281,25 @@ fn input_row<'a>(id: TabId, input: &'a FileInput) -> El<'a> {
     .into()
 }
 
+/// `a` turned `t` of the way into `b`.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let l = |x: f32, y: f32| x + (y - x) * t;
+    Color { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }
+}
+
 fn entry_row<'a>(id: TabId, f: &'a Files, e: &'a FileEntry) -> El<'a> {
     let folder = e.kind == FileKind::Dir;
     let selected = f.selected.as_deref() == Some(e.name.as_str());
     let menu_open = f.menu.as_deref() == Some(e.name.as_str());
-    let (icon, tint) = if folder { (&FOLDER, theme::ACCENT_TX) } else { (&FILE, theme::TEXT_3) };
+    let (icon, tint) = file_look(e);
+    // Hidden entries (`.cache`, `.bashrc`) step back a little.
+    let hidden = e.name.starts_with('.');
+    let (tint, name_colour) = if hidden { (alpha(tint, 0.6), theme::TEXT_2) } else { (tint, theme::TEXT) };
+    // Just uploaded or downloaded: it glows, fading.
+    let glow = f.flash_of(&e.name);
     let mut line = row![
         crate::icons::tinted(icon, 14.0, tint),
-        container(text(e.name.clone()).size(12).color(theme::TEXT).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true),
+        container(text(e.name.clone()).size(12).color(name_colour).wrapping(text::Wrapping::None)).width(Length::Fill).clip(true),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -192,16 +313,18 @@ fn entry_row<'a>(id: TabId, f: &'a Files, e: &'a FileEntry) -> El<'a> {
     let on_press = if folder { FilesMsg::Go(crate::files::join(&f.path, &e.name)) } else { FilesMsg::Select(e.name.clone()) };
     let row_btn = button(line).width(Length::Fill).padding([5, 8]).on_press(msg(id, on_press)).style(move |_, st| {
         let hover = menu_open || matches!(st, button::Status::Hovered | button::Status::Pressed);
+        let base = if selected {
+            alpha(theme::ACCENT, 0.22)
+        } else if hover {
+            alpha(Color::WHITE, 0.075)
+        } else {
+            Color::TRANSPARENT
+        };
         button::Style {
-            background: Some(Background::Color(if selected {
-                alpha(theme::ACCENT, 0.22)
-            } else if hover {
-                alpha(Color::WHITE, 0.075)
-            } else {
-                Color::TRANSPARENT
-            })),
+            background: Some(Background::Color(if glow > 0.0 { mix(base, alpha(theme::TEAL, 0.32), glow) } else { base })),
             text_color: theme::TEXT,
-            border: Border { radius: 8.0.into(), ..Default::default() },
+            border: Border { radius: 8.0.into(), color: alpha(theme::TEAL, 0.8 * glow), width: if glow > 0.0 { 1.0 } else { 0.0 } },
+            shadow: iced::Shadow { color: alpha(theme::TEAL, 0.45 * glow), offset: iced::Vector::ZERO, blur_radius: 14.0 * glow },
             ..Default::default()
         }
     });
@@ -371,4 +494,44 @@ pub fn confirm_dialog<'a>(tab: &'a Tab, c: &'a FileConfirm) -> El<'a> {
     .spacing(8);
     let border = crate::ui_hosts::env_color(tab.env).map_or(theme::LINE_2, |c| alpha(c, 0.6));
     container(col).padding(18).width(CONFIRM_W).style(card_style(border)).into()
+}
+
+
+#[cfg(test)]
+mod look_tests {
+    use super::*;
+
+    fn entry(name: &str, kind: FileKind, permissions: u32) -> FileEntry {
+        FileEntry { name: name.into(), kind, link: false, size: 0, modified: None, permissions: Some(permissions) }
+    }
+
+    #[test]
+    fn files_are_told_apart_by_what_they_are() {
+        let look = |name: &str, kind, mode| file_look(&entry(name, kind, mode)).1;
+        assert_eq!(look("devora-ai", FileKind::Dir, 0o755), theme::ACCENT_TX);
+        assert_eq!(look("main.rs", FileKind::File, 0o644), theme::BLUE);
+        assert_eq!(look("deploy.sh", FileKind::File, 0o644), theme::GREEN);
+        assert_eq!(look("run", FileKind::File, 0o755), theme::GREEN, "the owner may run it");
+        assert_eq!(look("nginx.conf", FileKind::File, 0o644), theme::ORANGE);
+        assert_eq!(look(".bashrc", FileKind::File, 0o644), theme::ORANGE);
+        assert_eq!(look(".bash_logout", FileKind::File, 0o644), theme::ORANGE);
+        assert_eq!(look("backup.tar.gz", FileKind::File, 0o644), theme::PURPLE);
+        assert_eq!(look("logo.PNG", FileKind::File, 0o644), theme::TEAL);
+        assert_eq!(look("syslog.log", FileKind::File, 0o644), theme::TEXT_2);
+        assert_eq!(look("id_ed25519.pub", FileKind::File, 0o644), theme::AMBER_300);
+        assert_eq!(look("authorized_keys", FileKind::File, 0o600), theme::AMBER_300);
+        assert_eq!(look(".viminfo", FileKind::File, 0o600), theme::TEXT_3, "nothing special");
+        assert_eq!(look(".sudo_as_admin_successful", FileKind::File, 0o644), theme::TEXT_3);
+    }
+
+    #[test]
+    fn the_path_is_steps_from_home_or_from_the_root() {
+        let steps = |p: &str, home: &str| crumbs(p, home).into_iter().map(|(l, to)| format!("{l}={to}")).collect::<Vec<_>>();
+        assert_eq!(steps("/home/hwr", "/home/hwr"), ["~=/home/hwr"]);
+        assert_eq!(steps("/home/hwr/devora-ai/src", "/home/hwr"), ["~=/home/hwr", "devora-ai=/home/hwr/devora-ai", "src=/home/hwr/devora-ai/src"]);
+        assert_eq!(steps("/etc/nginx", "/home/hwr"), ["/=/", "etc=/etc", "nginx=/etc/nginx"]);
+        assert_eq!(steps("/", "/home/hwr"), ["/=/"]);
+        assert_eq!(steps("/home/hwr2", "/home/hwr"), ["/=/", "home=/home", "hwr2=/home/hwr2"], "a neighbour of home is not home");
+        assert_eq!(steps("/root", "/"), ["/=/", "root=/root"]);
+    }
 }

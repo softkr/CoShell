@@ -139,9 +139,36 @@ pub struct Files {
     /// The prompt's folder (as the prompt shows it) last acted on, so a folder is followed once.
     followed: Option<String>,
     pub edits: Vec<RemoteEdit>,
+    /// When the folder shown last changed, and from which side its rows come in (1: deeper,
+    /// from the right; -1: back up, from the left).
+    pub moved: Option<(std::time::Instant, f32)>,
+    /// The entry that was just uploaded or downloaded, and when: it glows a moment.
+    pub flash: Option<(String, std::time::Instant)>,
 }
 
+/// How long a just-transferred entry glows (s).
+const FLASH: f32 = 1.4;
+
 impl Files {
+    /// Seconds since the folder shown changed, and the side it came in from, while its rows
+    /// are still coming in.
+    pub fn moved_since(&self) -> Option<(f32, f32)> {
+        #[cfg(test)]
+        return None;
+        #[cfg(not(test))]
+        self.moved.map(|(at, side)| (at.elapsed().as_secs_f32(), side)).filter(|(e, _)| *e < crate::motion::SLIDE_LEN)
+    }
+
+    /// How brightly entry `name` glows after its transfer (1 → 0).
+    pub fn flash_of(&self, name: &str) -> f32 {
+        self.flash.as_ref().filter(|(n, _)| n == name).map_or(0.0, |(_, at)| (1.0 - at.elapsed().as_secs_f32() / FLASH).max(0.0).powi(2))
+    }
+
+    /// Something in the panel is moving (rows coming in, an entry glowing).
+    pub fn animating(&self) -> bool {
+        self.moved_since().is_some() || self.flash.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() < FLASH)
+    }
+
     /// The connection is gone: forget the session and what it showed, keep the preference.
     pub fn reset(&mut self) {
         for t in &self.transfers {
@@ -458,6 +485,9 @@ impl CoShell {
                         if f.path != path {
                             f.selected = None;
                             f.input = None;
+                            // Deeper in comes from the right, back out from the left.
+                            let deeper = path.starts_with(&format!("{}/", f.path.trim_end_matches('/')));
+                            f.moved = Some((std::time::Instant::now(), if deeper { 1.0 } else { -1.0 }));
                         }
                         f.path = path;
                         f.entries = entries;
@@ -512,6 +542,10 @@ impl CoShell {
                 if t.state != TransferState::Done {
                     return Task::none();
                 }
+                // What arrived (or left) lights up in the list.
+                let name = t.name.clone();
+                f.flash = Some((name, std::time::Instant::now()));
+                let Some(t) = f.transfers.iter_mut().find(|t| t.id == tid) else { return Task::none() };
                 match std::mem::replace(&mut t.after, After::Nothing) {
                     After::Refresh(dir) if dir == f.path => return self.list_files(id, dir),
                     After::Edit { remote, local } => {

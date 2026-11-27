@@ -7,7 +7,7 @@ use iced::widget::text::Span;
 use iced::widget::{Space, button, column, container, mouse_area, row, span, text, text_input};
 use iced::{Alignment, Background, Border, Color, Font, Length, Padding};
 
-use crate::app::{ASK_INPUT, CoShell, Message, RUN_INPUT, SEARCH_INPUT, Tab};
+use crate::app::{ASK_INPUT, CoShell, Message, RUN_INPUT, SEARCH_INPUT, Tab, TabId};
 use crate::blocks::{self, Block, Mark, Prompt, Screen, Source};
 use crate::fonts::MONO;
 use crate::selectable::Selectable;
@@ -32,7 +32,7 @@ type Paint<'p> = &'p dyn Fn(AnsiColor) -> Color;
 fn badge<'a>(source: Source) -> El<'a> {
     let (content, bg, line, fg): (El<'a>, Color, Color, Color) = match source {
         Source::Ai => (
-            row![crate::ui::face(10.0, crate::ui::Face::STILL), text("AI").size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center).into(),
+            row![crate::ui::face(8.0, crate::ui::Face::STILL), text("AI").size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center).into(),
             alpha(theme::PURPLE, 0.12),
             alpha(theme::PURPLE, 0.25),
             theme::PURPLE,
@@ -125,6 +125,15 @@ fn system_kind(os: &str) -> System {
         System::Windows
     } else {
         System::Linux
+    }
+}
+
+/// The mark of the system named `os`.
+pub(crate) fn system_icon(os: &str) -> &'static std::sync::LazyLock<iced::widget::svg::Handle> {
+    match system_kind(os) {
+        System::Mac => &OS_MAC,
+        System::Windows => &OS_WINDOWS,
+        System::Linux => &OS_LINUX,
     }
 }
 
@@ -328,7 +337,14 @@ fn run_row<'a>(app: &'a CoShell, tab: &Tab, running: bool, secret: bool) -> El<'
                 }),
         );
     }
-    let placeholder = if secret { tr("비밀번호 입력 후 Enter (화면에 표시되지 않음)") } else { tr("실행 중인 프로그램에 입력 후 Enter · '#'으로 AI 질문") };
+    let placeholder = if secret {
+        tr("비밀번호 입력 후 Enter (화면에 표시되지 않음)")
+    } else if tab.sig.is_none() {
+        // No prompt yet: the shell is still starting.
+        tr("셸을 준비하는 중…")
+    } else {
+        tr("실행 중인 프로그램에 입력 후 Enter · '#'으로 AI 질문")
+    };
     r = r.push(
         text_input(placeholder, value)
             .id(RUN_INPUT)
@@ -382,7 +398,7 @@ fn prompt_row<'a>(app: &CoShell, tab: &Tab, p: &Prompt, typed: &str, caret_tail:
     let mut r = row![].spacing(6).align_y(Alignment::Center);
     if ai_mode {
         r = r.push(
-            container(row![crate::ui::face(10.0, app.face.idle()), text(tr("AI 질문")).size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center)).padding([2, 8]).style(|_| container::Style {
+            container(row![crate::ui::face(8.0, app.face.idle()), text(tr("AI 질문")).size(10.5).font(crate::ui::SEMIBOLD).color(theme::PURPLE)].spacing(5).align_y(Alignment::Center)).padding([2, 8]).style(|_| container::Style {
                 background: Some(Background::Color(alpha(theme::PURPLE, 0.15))),
                 border: Border { color: alpha(theme::PURPLE, 0.3), width: 1.0, radius: crate::ui::R_PILL.into() },
                 ..Default::default()
@@ -484,67 +500,18 @@ const SHEET_R: f32 = 20.0;
 const SHEET_MARGIN: f32 = 28.0;
 /// Width of the divider beside the side panel.
 const SIDE_EDGE: f32 = 4.0;
-/// How wide the sheet is while it rises, before it widens.
-const SHEET_START_W: f32 = 260.0;
-/// The entrance, as parts of its length: rising takes the first part, widening starts
-/// a little before the rise ends so the two run into each other.
-const INTRO_RISE: f32 = 0.5;
-const INTRO_WIDEN_FROM: f32 = 0.38;
-
-/// Fast at first, coming gently to rest.
-fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
-}
+/// Narrowest the sheet gets in a small window.
+const SHEET_MIN_W: f32 = 260.0;
 
 /// Gentle at both ends.
 fn ease_in_out(t: f32) -> f32 {
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
 }
 
-/// Height of the wave along the sheet's top.
-const WAVE_H: f32 = 44.0;
-/// The wave's ribbons: colour, cycles across the sheet, share of the height, shift, width.
-const RIBBONS: [(Color, f32, f32, f32, f32); 3] = [
-    (alpha(theme::EMBER, 0.85), 1.6, 0.36, 0.0, 2.0),
-    (alpha(theme::SKY, 0.85), 2.1, 0.30, 2.1, 1.8),
-    (alpha(theme::PURPLE, 0.7), 1.3, 0.24, 4.2, 1.4),
-];
-
-/// The assistant's presence: three ribbons that drift while it waits and swell while it works,
-/// pinched to nothing at both ends.
-struct Wave {
-    phase: f32,
-    busy: bool,
-    /// Extra height as the conversation opens (1 → 0).
-    surge: f32,
-}
-
-impl iced::widget::canvas::Program<Message> for Wave {
-    type State = ();
-
-    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &iced::Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
-        use iced::Point;
-        use iced::widget::canvas::{Frame, Path, Stroke};
-        let mut frame = Frame::new(renderer, bounds.size());
-        let (w, h) = (bounds.width, bounds.height);
-        let swell = if self.busy { 1.5 } else { 0.8 } + 0.9 * self.surge;
-        for (colour, cycles, share, shift, width) in RIBBONS {
-            let ribbon = Path::new(|p| {
-                let steps = (w / 4.0).max(1.0) as usize;
-                for i in 0..=steps {
-                    let t = i as f32 / steps as f32;
-                    // Pinched at the ends, fullest in the middle.
-                    let envelope = (t * std::f32::consts::PI).sin().powi(2);
-                    let y = h / 2.0 + (t * cycles * std::f32::consts::TAU + self.phase + shift).sin() * h * share * swell * envelope;
-                    let at = Point::new(t * w, y.clamp(1.0, h - 1.0));
-                    if i == 0 { p.move_to(at) } else { p.line_to(at) }
-                }
-            });
-            frame.stroke(&ribbon, Stroke::default().with_color(colour).with_width(width));
-        }
-        vec![frame.into_geometry()]
-    }
-}
+/// The orb over the sheet, as a face height (`ui::face`): large, so its light can be seen.
+const SHEET_ORB: f32 = 52.0;
+/// How wide (and tall) that makes it.
+const SHEET_ORB_D: f32 = SHEET_ORB * crate::ui::FACE_ASPECT;
 
 /// Height of the fade under the sheet's top edge.
 const SHEET_FADE: f32 = 22.0;
@@ -566,9 +533,10 @@ fn glow(app: &CoShell, working: bool) -> iced::gradient::Linear {
 /// next question; while a reply is coming the send button is a stop button.
 fn ask_row<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
     let working = tab.chat.is_streaming();
-    let field = text_input("", q)
+    // The question is kept with its `#` (what opened the conversation); the field shows it without.
+    let field = text_input(tr("무엇이든 물어보세요"), q.strip_prefix('#').unwrap_or(q))
         .id(ASK_INPUT)
-        .on_input(Message::AskInput)
+        .on_input(|typed| Message::AskInput(format!("#{typed}")))
         .on_submit(Message::AskSubmit)
         .font(MONO)
         .size(TEXT)
@@ -587,7 +555,6 @@ fn ask_row<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
         button(container(crate::icons::tinted(&SEND, 13.0, theme::ON_ACCENT)).center(28)).padding(0).on_press(Message::AskSubmit).style(move |_, _| round(Background::Gradient(edge.into()))).into()
     };
     let r = row![
-        crate::ui::face(14.0, if working { app.face } else { app.face.idle() }),
         field,
         mono(tr("Enter 질문 · Esc 닫기"), 11.0, theme::TEXT_3),
         crate::ui::tip(close, tr("대화 닫기"), iced::widget::tooltip::Position::Top),
@@ -616,35 +583,32 @@ fn ask_row<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
         .into()
 }
 
-/// The conversation, on a sheet of dark glass that rises from the dock over the terminal.
-fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
+/// How the conversation's sheet stands for `tab`: how far it is drawn into the dock (0: all
+/// out), and whether it is the live conversation (on its way out it takes no input). None:
+/// not on screen.
+fn sheet_motion(app: &CoShell, tab: TabId) -> Option<(f32, bool)> {
+    if app.ask.as_ref().is_some_and(|(id, _)| *id == tab) {
+        return Some((1.0 - ease_in_out(app.chat_intro()), true));
+    }
+    app.chat_outro().filter(|(id, _)| *id == tab).map(|(_, o)| (ease_in_out(o), false))
+}
+
+/// The conversation, on a sheet of dark glass over the terminal. Like a window from the
+/// Dock it pours out of the AI's face in the dock as it opens and is drawn back into it as
+/// it closes (`sucked`: how far in it is).
+fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab, sucked: f32, live: bool) -> El<'a> {
     let max_height = app.settings.window.height * SHEET_MAX_PART;
-    let talk = crate::ui_ai::sheet_conversation(tab, app.prod_guard, app.face, app.fold, max_height);
+    let talk = crate::ui_ai::sheet_conversation(tab, app.prod_guard, app.fold, max_height);
     // What has scrolled up fades into the sheet instead of being cut at its edge.
     let fade = container(Space::new()).width(Length::Fill).height(SHEET_FADE).style(|_| {
         let into_sheet = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, theme::BG_3).add_stop(1.0, alpha(theme::BG_3, 0.0));
         container::Style { background: Some(Background::Gradient(into_sheet.into())), ..Default::default() }
     });
-    let entrance = settle(app.chat_intro());
-    let wave = iced::widget::canvas::Canvas::new(Wave { phase: app.wave, busy: tab.chat.is_streaming(), surge: entrance }).width(Length::Fill).height(WAVE_H);
-    let talk = column![wave, crate::ui::rule(true), iced::widget::stack![talk, fade], crate::ui::rule(true), crate::ui_ai::sheet_tools(app, tab)];
-    // The conversation is laid out at its final width from the first frame, so nothing
-    // re-wraps while the sheet opens: the sheet is a window on it that grows.
+    // Room at the top for the lower half of the orb that floats over the sheet's edge.
+    let talk = column![Space::new().height(SHEET_ORB_D / 2.0 + 4.0), iced::widget::stack![talk, fade], crate::ui::rule(true), crate::ui_ai::sheet_tools(app, tab)];
     let side = if app.settings.sidebar_open { app.settings.sidebar_width + SIDE_EDGE } else { 0.0 };
-    let full_w = (app.settings.window.width - crate::ui_sidebar::DOCK_W - side - 2.0 * SHEET_MARGIN).clamp(SHEET_START_W, SHEET_W);
-    let intro = app.chat_intro();
-    // First it rises from the middle of the dock, narrow; then it widens to both sides.
-    let rise = ease_out((intro / INTRO_RISE).min(1.0));
-    let widen = ease_in_out(((intro - INTRO_WIDEN_FROM) / (1.0 - INTRO_WIDEN_FROM)).clamp(0.0, 1.0));
-    let opening = intro < 1.0;
-    let talk = container(talk).width(full_w);
-    let talk: El<'a> = if opening {
-        let width = SHEET_START_W + (full_w - SHEET_START_W) * widen;
-        crate::reveal::Reveal::new(talk, full_w, width, (app.settings.window.height * rise).max(1.0)).into()
-    } else {
-        talk.into()
-    };
-    let sheet = container(talk).clip(true).style(|_| {
+    let full_w = (app.settings.window.width - crate::ui_sidebar::DOCK_W - side - 2.0 * SHEET_MARGIN).clamp(SHEET_MIN_W, SHEET_W);
+    let sheet = container(container(talk).width(full_w)).clip(true).style(|_| {
         let glass = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, alpha(theme::BG_3, 0.9)).add_stop(1.0, alpha(theme::BG_1, 0.94));
         container::Style {
             background: Some(Background::Gradient(glass.into())),
@@ -655,16 +619,34 @@ fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
         }
     });
     // Clicks on the sheet stay on it; around it the terminal is still within reach.
-    container(iced::widget::opaque(sheet)).center_x(Length::Fill).align_bottom(Length::Fill).padding(Padding { top: 24.0, right: SHEET_MARGIN, bottom: 4.0, left: SHEET_MARGIN }).into()
+    let sheet: El<'a> = if live { iced::widget::opaque(sheet) } else { sheet.into() };
+    // The AI itself floats over the sheet's top edge, half above it.
+    let orb = container(crate::ui::face(SHEET_ORB, app.face)).center_x(Length::Fill);
+    let sheet = iced::widget::stack![column![Space::new().height(SHEET_ORB_D / 2.0), sheet], orb];
+    crate::genie::Genie::new(sheet, sucked, FACE_SPOT, Padding { top: 24.0, right: SHEET_MARGIN, bottom: 4.0, left: SHEET_MARGIN }, live).into()
 }
+
+/// The dock, found on screen when a snippet's command flies into it.
+pub const DOCK: &str = "term-dock";
 
 /// Padding around the dock at the bottom of the terminal.
 const DOCK_PAD: Padding = Padding { top: 8.0, right: 28.0, bottom: 16.0, left: 28.0 };
+/// Height of the AI face at the dock's left.
+const DOCK_FACE: f32 = 14.0;
+/// The middle of that face, from the bottom left corner of the area above the dock: where
+/// the sheet comes from and goes back to.
+const FACE_SPOT: iced::Vector = iced::Vector::new(DOCK_PAD.left + 14.0 + DOCK_FACE * crate::ui::FACE_ASPECT / 2.0, DOCK_PAD.top + 22.0);
 
 /// The chat over a terminal that has no block view (a full-screen program is running):
 /// the sheet and the question dock along the bottom, the program still visible above.
-pub fn chat_overlay<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
-    column![chat_sheet(app, tab), iced::widget::opaque(container(ask_row(app, tab, q)).padding(DOCK_PAD))].into()
+/// On its way out only the sheet, going back into where the dock was.
+pub fn chat_overlay<'a>(app: &'a CoShell, tab: &'a Tab) -> Option<El<'a>> {
+    let (sucked, live) = sheet_motion(app, tab.id)?;
+    let sheet = chat_sheet(app, tab, sucked, live);
+    match app.ask.as_ref().filter(|(id, _)| *id == tab.id) {
+        Some((_, q)) => Some(column![sheet, iced::widget::opaque(container(ask_row(app, tab, q)).padding(DOCK_PAD))].into()),
+        None => Some(sheet),
+    }
 }
 
 pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
@@ -718,7 +700,7 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
             run_row(app, tab, running, last_line.is_some_and(|l| blocks::asks_secret(&l.text)))
         }
     };
-    let dock = Some(container(dock).padding(DOCK_PAD));
+    let dock = Some(container(dock).padding(DOCK_PAD).id(iced::widget::Id::new(DOCK)));
     col = col.push(Space::new().height(24));
     let body = crate::ui::scroll(container(col).padding(Padding { top: 24.0, right: 28.0, bottom: 0.0, left: 28.0 }).width(Length::Fill))
         .anchor_bottom()
@@ -726,7 +708,10 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
         .width(Length::Fill);
     // A click anywhere gives the keyboard back to the shell.
     let body: El<'a> = mouse_area(body).on_press(Message::FocusTerminal).into();
-    let body = if asking.is_some() { iced::widget::stack![body, chat_sheet(app, tab)].into() } else { body };
+    let body = match sheet_motion(app, tab.id) {
+        Some((sucked, live)) => iced::widget::stack![body, chat_sheet(app, tab, sucked, live)].into(),
+        None => body,
+    };
     let mut layers = column![];
     if app.search.is_some() {
         layers = layers.push(search_strip(query, shown, screen.blocks.len()));
@@ -789,10 +774,9 @@ mod system_tests {
         assert!(settle(0.5) < 0.5, "most of the movement comes early");
         assert!(settle(0.2) > settle(0.6));
         assert_eq!(settle(7.0), 0.0, "never past the end");
-        for ease in [ease_out as fn(f32) -> f32, ease_in_out] {
-            assert_eq!((ease(0.0), ease(1.0)), (0.0, 1.0));
-            assert!(ease(0.3) < ease(0.6), "always forward");
-        }
+        assert_eq!((ease_in_out(0.0), ease_in_out(1.0)), (0.0, 1.0));
+        assert!(ease_in_out(0.3) < ease_in_out(0.6), "always forward");
+        assert!((ease_in_out(0.3) - (1.0 - ease_in_out(0.7))).abs() < 1e-6, "symmetric: an exit turned back half way meets its entrance");
     }
 
     #[test]

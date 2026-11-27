@@ -42,4 +42,34 @@ impl Connection {
         }
         Ok(out)
     }
+
+    /// Start `cmd` in a fresh non-interactive session on the target and hand back what it
+    /// prints as it prints it. The command runs until it ends or the stream is dropped
+    /// (which closes its channel: the server takes its output away and it stops).
+    pub async fn exec_stream(&self, cmd: &str) -> Result<ExecStream, SshError> {
+        let label = self.labels().last().cloned().unwrap_or_default();
+        let ssh = |source| SshError::Ssh { hop: label.clone(), source };
+        let channel = self.target().channel_open_session().await.map_err(ssh)?;
+        channel.exec(true, cmd).await.map_err(ssh)?;
+        Ok(ExecStream { channel })
+    }
+}
+
+/// The output of a running command (see [`Connection::exec_stream`]).
+pub struct ExecStream {
+    channel: russh::Channel<russh::client::Msg>,
+}
+
+impl ExecStream {
+    /// The next piece of output (stdout only); `None` once the command has ended or the
+    /// connection is gone.
+    pub async fn next(&mut self) -> Option<Vec<u8>> {
+        loop {
+            match self.channel.wait().await? {
+                ChannelMsg::Data { data } => return Some(data.to_vec()),
+                ChannelMsg::Failure | ChannelMsg::Close | ChannelMsg::ExitStatus { .. } => return None,
+                _ => {}
+            }
+        }
+    }
 }

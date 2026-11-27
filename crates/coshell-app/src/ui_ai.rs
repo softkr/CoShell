@@ -14,7 +14,7 @@ use crate::assist::{self, Risk, Segment};
 use crate::theme::{self, alpha};
 use crate::icons::{CHECK, CHEVRON_DOWN, CHEVRON_RIGHT, COPY, PAPERCLIP, PENCIL, PLUS, X, ZAP};
 use crate::ui_status::Mark;
-use crate::ui::{Btn, El, Face, SEMIBOLD, btn, icon_btn, input_style, mono, muted, tip};
+use crate::ui::{Btn, El, SEMIBOLD, btn, icon_btn, input_style, mono, muted, tip};
 
 /// The first code block's run button (tests click it by this id).
 pub const RUN_BTN: &str = "ai-run";
@@ -131,13 +131,6 @@ pub(crate) fn sheet_tools<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
     container(tools).padding(Padding { top: 6.0, right: 14.0, bottom: 6.0, left: 16.0 }).into()
 }
 
-/// Height of the assistant's face beside its replies.
-const AVATAR: f32 = 18.0;
-
-/// The assistant's mark beside its replies.
-fn ai_avatar<'a>(face: Face) -> El<'a> {
-    crate::ui::face(AVATAR, face)
-}
 
 /// Message bubble: `bg` fill, thin border, rounded.
 fn bubble<'a>(content: impl Into<El<'a>>, bg: Color) -> El<'a> {
@@ -167,10 +160,10 @@ const SHEET_WELCOME_W: f32 = 420.0;
 
 /// The chat sheet's conversation: as tall as what was said, up to `max_height`.
 /// `face`: the welcome's expression; `fold`: seconds into the working reply's fold cycle.
-pub(crate) fn sheet_conversation(tab: &Tab, guard: bool, face: Face, fold: f32, max_height: f32) -> El<'_> {
+pub(crate) fn sheet_conversation(tab: &Tab, guard: bool, fold: f32, max_height: f32) -> El<'_> {
     match turns(tab, guard, fold) {
         Some(col) => container(crate::ui::scroll(col).anchor_bottom()).max_height(max_height).into(),
-        None => container(container(welcome(tab, face.idle())).max_width(SHEET_WELCOME_W)).center_x(Length::Fill).into(),
+        None => container(container(welcome(tab)).max_width(SHEET_WELCOME_W)).center_x(Length::Fill).into(),
     }
 }
 
@@ -244,10 +237,26 @@ fn working_label<'a>(t: &Turn, fold: f32) -> El<'a> {
     text(format!("{doing}{dots}")).size(12).font(SEMIBOLD).color(theme::ACCENT_TX).into()
 }
 
+/// The AI page's mark: a white sparkle on the purple tile it has in the settings sidebar.
+fn ai_tile<'a>() -> El<'a> {
+    container(crate::icons::tinted(&crate::icons::SPARKLES, 14.0, Color::WHITE))
+        .center(24)
+        .style(|_| {
+            let face = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, Color::from_rgb8(0xC2, 0x74, 0xFF)).add_stop(1.0, Color::from_rgb8(0xA8, 0x55, 0xE8));
+            container::Style {
+                background: Some(Background::Gradient(face.into())),
+                border: Border { radius: 7.0.into(), ..Default::default() },
+                shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.25), offset: iced::Vector::new(0.0, 1.0), blur_radius: 2.0 },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
 /// How long each of the working label's dots lasts.
 const WORKING_DOT_SECS: f32 = 0.45;
 
-fn welcome(tab: &Tab, face: Face) -> El<'_> {
+fn welcome(tab: &Tab) -> El<'_> {
     let id = tab.id;
     let suggestions: &[(&str, bool)] = if tab.is_local() {
         &[(tr("마지막 출력에서 문제를 찾아줘"), true), (tr("이 폴더에서 용량 큰 파일 찾는 명령"), false)]
@@ -255,8 +264,6 @@ fn welcome(tab: &Tab, face: Face) -> El<'_> {
         &[(tr("마지막 출력에서 문제를 찾아줘"), true), (tr("디스크를 많이 쓰는 디렉터리 찾는 명령"), false), (tr("최근 1시간 에러 로그 보는 명령"), false)]
     };
     let mut col = column![
-        ai_avatar(face),
-        Space::new().height(6),
         text(tf("{0}에 대해서 물어보세요", &[&tab.custom_name.as_deref().unwrap_or(&tab.name)])).size(13).font(SEMIBOLD).color(theme::SLATE_100),
         muted(tr("터미널 출력은 직접 첨부할 때만 전송됩니다")),
         Space::new().height(12),
@@ -987,7 +994,7 @@ pub fn settings_page(s: &Settings) -> El<'_> {
     .spacing(8);
 
     column![
-        row![crate::icons::icon(&crate::icons::API_BRIDGE, 16.0), text(tr("AI 연결 설정")).size(13)].spacing(8).align_y(Alignment::Center),
+        row![ai_tile(), text(tr("AI 연결 설정")).size(14).font(SEMIBOLD)].spacing(10).align_y(Alignment::Center),
         row![
             container(crate::ui::scroll(list)).width(190).height(Length::Fill),
             column![container(crate::ui::scroll(container(form).padding(Padding::ZERO.right(12.0)))).height(Length::Fill), actions].spacing(8).width(Length::Fill),

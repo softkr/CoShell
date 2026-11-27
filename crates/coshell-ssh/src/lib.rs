@@ -11,7 +11,7 @@ pub mod config;
 mod forward;
 mod hostkey;
 pub mod keys;
-pub use exec::ExecOutput;
+pub use exec::{ExecOutput, ExecStream};
 mod prompt;
 mod sftp;
 mod shell;

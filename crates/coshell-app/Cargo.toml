@@ -16,6 +16,8 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1.2.1"
 iced.workspace = true
+# The renderer's two halves by name: light is drawn on the GPU where there is one (glow.rs).
+iced_renderer = "=0.14.0"
 unicode-width.workspace = true
 zeroize.workspace = true
 futures.workspace = true

@@ -12,7 +12,8 @@ mod metrics;
 mod conn;
 mod files;
 mod form;
-mod reveal;
+mod genie;
+mod glow;
 mod context_menu;
 mod fonts;
 mod hangul;
@@ -24,6 +25,7 @@ mod keys;
 mod launch;
 #[cfg(target_os = "macos")]
 mod menu;
+mod motion;
 mod selectable;
 mod settings;
 mod terminal;

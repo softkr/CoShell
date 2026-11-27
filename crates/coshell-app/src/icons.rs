@@ -20,7 +20,6 @@ macro_rules! svg_handle {
 svg_handle!(APP, "svg/coshell-app.svg");
 svg_handle!(PORT_FORWARDING, "features/port-forwarding.svg");
 svg_handle!(SAFE_GUARD, "features/safe-guard.svg");
-svg_handle!(API_BRIDGE, "features/api-bridge.svg");
 // Symbolic UI icons (drawn black, tinted where used).
 svg_handle!(SEND, "icons/send.svg");
 svg_handle!(STOP, "icons/stop.svg");
@@ -46,6 +45,13 @@ svg_handle!(UNPLUG, "icons/unplug.svg");
 svg_handle!(FOLDER, "icons/folder.svg");
 svg_handle!(FOLDER_PLUS, "icons/folder-plus.svg");
 svg_handle!(FILE, "icons/file.svg");
+// What kind of file it is, in the file panel.
+svg_handle!(FILE_CODE, "icons/file-code.svg");
+svg_handle!(FILE_TEXT, "icons/file-text.svg");
+svg_handle!(FILE_TERMINAL, "icons/file-terminal.svg");
+svg_handle!(FILE_CONFIG, "icons/file-config.svg");
+svg_handle!(FILE_ARCHIVE, "icons/file-archive.svg");
+svg_handle!(FILE_IMAGE, "icons/file-image.svg");
 svg_handle!(UPLOAD, "icons/upload.svg");
 svg_handle!(DOWNLOAD, "icons/download.svg");
 svg_handle!(REFRESH, "icons/refresh.svg");

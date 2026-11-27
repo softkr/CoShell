@@ -311,60 +311,129 @@ pub(crate) fn kbd<'a>(s: impl Into<String>) -> El<'a> {
     .into()
 }
 
-/// The assistant's mark: a small iridescent disc (blue through purple to pink).
-/// The AI's expression: eyes shut for a blink, or glancing aside while it works.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The AI's state as its mark shows it: the moment of the wave in its orb, and whether it is
+/// speaking (a reply is coming). Blink and glance pace the conversation's other marks.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Face {
     pub blink: bool,
     /// -1 looks left, 1 right, 0 straight ahead.
     pub look: i8,
+    /// The wave's moment, in hundredths (the conversation's wave phase × 100).
+    pub turn: u16,
+    /// A reply is coming: the wave speaks instead of rolling.
+    pub voice: bool,
+    /// The light's clock, in seconds (where it is drawn on the GPU).
+    pub at: f32,
+    /// How much it is speaking, 0 → 1: `voice`, eased so the light never jumps.
+    pub level: f32,
 }
 
 impl Face {
-    /// Eyes open, looking ahead: for faces that stay still (old messages, block badges).
-    pub const STILL: Face = Face { blink: false, look: 0 };
+    /// Still: for marks that stay put (old messages, block badges).
+    pub const STILL: Face = Face { blink: false, look: 0, turn: 0, voice: false, at: 0.0, level: 0.0 };
 
-    /// Blinks, but keeps looking ahead (the AI is not working on anything).
+    /// Not working on anything: the wave rolls, it does not speak.
     pub fn idle(self) -> Face {
-        Face { look: 0, ..self }
+        Face { look: 0, voice: false, level: 0.0, ..self }
     }
 }
 
-/// Pill width over its height.
-const FACE_ASPECT: f32 = 1.8;
-/// Eye diameter over the pill's height.
-const FACE_EYE: f32 = 0.32;
-/// Eye height while blinking, over its diameter.
-const FACE_BLINK: f32 = 0.3;
-/// Gap between the eyes, over their diameter.
-const FACE_EYE_GAP: f32 = 0.9;
-/// How far the eyes move on a glance, over their diameter.
-const FACE_LOOK: f32 = 0.45;
+/// The orb's width (and height) over the `height` a face is asked for: as wide as the pill
+/// it replaced, so it has room to show what moves in it.
+pub(crate) const FACE_ASPECT: f32 = 1.8;
 
-/// The AI's mark: a white pill with two eyes, `height` tall.
+/// The AI's mark: a glass orb with the conversation's wave inside it, rolling like the sea
+/// while it waits and flickering like a voice while it answers. `height` (about) tall.
 pub(crate) fn face<'a>(height: f32, f: Face) -> El<'a> {
-    let eye = (height * FACE_EYE).max(2.0);
-    let eye_h = if f.blink { (eye * FACE_BLINK).max(1.0) } else { eye };
-    let shift = f32::from(f.look) * eye * FACE_LOOK;
-    let pupil = move || {
-        container(Space::new()).width(eye).height(eye_h).style(move |_| container::Style {
-            background: Some(Background::Color(theme::BG_0)),
-            border: Border { radius: (eye / 2.0).into(), ..Default::default() },
-            ..Default::default()
-        })
-    };
-    let eyes = row![pupil(), pupil()].spacing(eye * FACE_EYE_GAP).align_y(Alignment::Center);
-    // Padding on one side moves the centred eyes by `shift`.
-    let aside = Padding { left: (2.0 * shift).max(0.0), right: (-2.0 * shift).max(0.0), ..Padding::ZERO };
-    container(container(eyes).padding(aside).center(Length::Fill))
-        .width(height * FACE_ASPECT)
-        .height(height)
-        .style(move |_| container::Style {
-            background: Some(Background::Color(theme::TEXT)),
-            border: Border { radius: (height / 2.0).into(), ..Default::default() },
-            ..Default::default()
-        })
-        .into()
+    let d = height * FACE_ASPECT;
+    let soft = iced::widget::canvas(Orb(f)).width(d).height(d);
+    crate::glow::light(crate::glow::Light { kind: crate::glow::Kind::Orb, at: f.at, voice: f.level, surge: 0.0 }, d.into(), d.into(), soft)
+}
+
+struct Orb(Face);
+
+/// The voice's bands, back to front: colour and how tall they get (over the room there is).
+const ORB_BANDS: [(Color, f32); 3] = [(theme::PURPLE, 0.95), (theme::BLUE, 0.8), (theme::TEAL, 0.62)];
+
+/// How tall band `band` is at `x` (0 → 1 across the orb), at time `t`: 0 at the edges, up to
+/// about 1. A few soft swells drift slowly along it. Waiting, they breathe; speaking, each
+/// rises and falls a few times a second, like syllables.
+/// (Every speed is a whole number of hundredths, so the time can wrap at τ·100 unseen.)
+pub(crate) fn orb_level(x: f32, t: f32, band: usize, voice: bool) -> f32 {
+    use std::f32::consts::PI;
+    let b = band as f32;
+    let edges = (x * PI).sin().abs().powf(1.6);
+    let mut level = 0.0;
+    for (j, (drift, rate)) in [(0.31, 6.0), (0.23, 8.0), (0.17, 5.0)].into_iter().enumerate() {
+        let j = j as f32;
+        let centre = 0.5 + 0.28 * (drift * t + 2.3 * j + 1.9 * b).sin();
+        let strength = if voice {
+            0.15 + 0.85 * ((rate * t + 1.3 * j + 2.1 * b).sin() * (0.5 * rate * t + j + b).sin()).abs()
+        } else {
+            0.45 + 0.2 * (0.6 * t + 1.7 * j + 2.6 * b).sin()
+        };
+        level += strength * (-((x - centre) / 0.2).powi(2)).exp();
+    }
+    // Loud swells lean toward full height instead of stopping flat at it.
+    (edges * level).tanh()
+}
+
+impl<Message> iced::widget::canvas::Program<Message> for Orb {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Path, Stroke, gradient};
+        use iced::Point;
+        let mut frame = Frame::new(renderer, bounds.size());
+        // A hair inside its box, so the rim is never cut.
+        let r = bounds.width.min(bounds.height) / 2.0 - 0.75;
+        let c = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let t = f32::from(self.0.turn) / 100.0;
+        // The glass: deep at the bottom right, lighter where the light comes from.
+        let glass = gradient::Linear::new(Point::new(c.x - r, c.y - r), Point::new(c.x + r, c.y + r))
+            .add_stop(0.0, Color::from_rgb8(0x2C, 0x29, 0x46))
+            .add_stop(1.0, Color::from_rgb8(0x08, 0x07, 0x12));
+        frame.fill(&Path::circle(c, r), glass);
+        // A soft light in the middle, behind the wave.
+        for (share, a) in [(0.7, 0.05), (0.45, 0.08), (0.25, 0.12)] {
+            frame.fill(&Path::circle(c, r * share), Color { a, ..Color::WHITE });
+        }
+        // The voice across the middle: each band swells up and down from the centre line
+        // alike, pinched at the edges and never taller than the orb is there.
+        let steps = (2.0 * r).clamp(16.0, 72.0) as usize;
+        let span = r * 0.9;
+        for (k, (colour, height)) in ORB_BANDS.into_iter().enumerate() {
+            let levels: Vec<(f32, f32)> = (0..=steps)
+                .map(|i| {
+                    let x = i as f32 / steps as f32;
+                    let u = 2.0 * x - 1.0;
+                    let room = span * 0.92 * (1.0 - u * u).max(0.0).sqrt();
+                    (c.x + u * span, room * orb_level(x, t, k, self.0.voice) * height)
+                })
+                .collect();
+            let band = Path::new(|p| {
+                p.move_to(Point::new(c.x - span, c.y));
+                for (x, h) in &levels {
+                    p.line_to(Point::new(*x, c.y - h));
+                }
+                for (x, h) in levels.iter().rev() {
+                    p.line_to(Point::new(*x, c.y + h * 0.9));
+                }
+                p.close();
+            });
+            // A glow round it, its body, then its bright edge.
+            frame.stroke(&band, Stroke::default().with_width((r * 0.16).max(1.2)).with_color(Color { a: 0.08, ..colour }));
+            frame.fill(&band, Color { a: 0.3, ..colour });
+            frame.stroke(&band, Stroke::default().with_width((r * 0.035).max(0.6)).with_color(Color { a: 0.85, ..colour }));
+        }
+        // An iridescent rim, brightest where the light falls.
+        let rim = gradient::Linear::new(Point::new(c.x - r, c.y - r), Point::new(c.x + r, c.y + r))
+            .add_stop(0.0, Color { a: 0.75, ..theme::PURPLE })
+            .add_stop(0.5, Color { a: 0.35, ..theme::TEAL })
+            .add_stop(1.0, Color { a: 0.65, ..theme::BLUE });
+        frame.stroke(&Path::circle(c, r - r * 0.04), Stroke { style: iced::widget::canvas::Style::Gradient(rim.into()), width: (r * 0.08).max(0.8), ..Stroke::default() });
+        vec![frame.into_geometry()]
+    }
 }
 
 pub(crate) fn mono<'a>(s: impl Into<String>, size: f32, color: Color) -> El<'a> {
@@ -401,6 +470,11 @@ pub fn view(app: &CoShell) -> El<'_> {
     }
     let main: El<'_> = main.into();
     let mut layers = vec![main];
+    // A snippet's command on its way into the dock, over everything else in the window.
+    if let (Some(f), Some(progress)) = (&app.flight, app.flight_progress()) {
+        let flight = crate::motion::Flight { from: f.from, to: f.to, cmd: f.cmd.clone(), progress };
+        layers.push(iced::widget::canvas(flight).width(Length::Fill).height(Length::Fill).into());
+    }
     if let Some(n) = &app.notice {
         layers.push(toast(n));
     }
@@ -730,25 +804,6 @@ fn tab_bar(app: &CoShell) -> El<'_> {
         .height(BAR_H - 1.0);
 
     let live = app.live_tab().is_some() && !app.host_view;
-    let diagnose = button(
-        row![
-            face(12.0, if app.active_tab().is_some_and(|t| t.chat.is_streaming()) { app.face } else { app.face.idle() }),
-            text(tr("AI 진단")).size(11.5).font(MEDIUM)
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    )
-    .padding([6, 11])
-    .on_press_maybe(app.active_tab().map(|_| Message::AiDiagnose))
-    .style(|_, st| {
-        let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: Some(Background::Color(alpha(theme::ACCENT, if hover { 0.2 } else { 0.12 }))),
-            text_color: theme::ACCENT_TX,
-            border: Border { radius: R_PILL.into(), ..Default::default() },
-            ..Default::default()
-        }
-    });
     let tool = |icon: &'static std::sync::LazyLock<iced::widget::svg::Handle>, label: &'static str, msg: Message| -> El<'static> {
         let b = button(crate::icons::tinted(icon, 14.0, theme::TEXT_2)).padding(6).on_press_maybe(live.then_some(msg)).style(|_, st| button::Style {
             background: matches!(st, button::Status::Hovered).then_some(Background::Color(theme::BG_3)),
@@ -758,7 +813,6 @@ fn tab_bar(app: &CoShell) -> El<'_> {
         tip(b, label, tooltip::Position::Bottom)
     };
     let tools = row![
-        tip(diagnose, tr("현재 서버 AI 자동 진단"), tooltip::Position::Bottom),
         tool(&SEARCH, tr("터미널 출력 검색 (⌘F)"), Message::Shortcut(crate::app::Shortcut::Find)),
         tool(&ERASER, tr("터미널 화면 지우기 (clear)"), Message::TermClear),
     ]
@@ -893,8 +947,8 @@ fn body(app: &CoShell) -> El<'_> {
             }
             let mut layers = vec![term];
             // No block view (a full-screen program has the terminal): the chat still opens over it.
-            if let Some((_, q)) = app.ask.as_ref().filter(|(id, _)| *id == tab.id) {
-                layers.push(crate::ui_term::chat_overlay(app, tab, q));
+            if let Some(chat) = crate::ui_term::chat_overlay(app, tab) {
+                layers.push(chat);
             }
             if tab.exited {
                 layers.push(exited_banner(tab));
@@ -909,22 +963,64 @@ fn body(app: &CoShell) -> El<'_> {
     }
 }
 
-/// Shown over a session that ended: the output stays readable and selectable.
+/// How long the banner of a session that ended takes to slide in.
+pub(crate) const BANNER_IN: std::time::Duration = std::time::Duration::from_millis(420);
+
+/// How long something lasted, the way a person would say it: "a moment", "12 min", "1 h 5 min".
+fn span(d: std::time::Duration) -> String {
+    let mins = d.as_secs() / 60;
+    match (mins / 60, mins % 60) {
+        (0, 0) => tr("방금").to_string(),
+        (0, m) => tf("{0}분", &[&m]),
+        (h, m) => tf("{0}시간 {1}분", &[&h, &m]),
+    }
+}
+
+/// An icon in a soft disc of its colour: the head of a connection's cards.
+fn icon_disc<'a>(icon: &'static std::sync::LazyLock<iced::widget::svg::Handle>, colour: Color, size: f32) -> El<'a> {
+    container(crate::icons::tinted(icon, size * 0.45, colour)).center(size).style(move |_| container::Style {
+        background: Some(Background::Color(alpha(colour, 0.14))),
+        border: Border { color: alpha(colour, 0.4), width: 1.0, radius: (size / 2.0).into() },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Shown over a session that ended: the output stays readable and selectable. It slides up
+/// from the bottom as the session ends.
 fn exited_banner(tab: &Tab) -> El<'_> {
-    let (label, again) = if tab.is_local() { (tr("셸이 종료되었습니다"), tr("새 셸 시작")) } else { (tr("연결이 끊어졌습니다"), tr("다시 연결")) };
+    let local = tab.is_local();
+    let (label, again) = if local { (tr("셸이 종료되었습니다"), tr("새 셸 시작")) } else { (tr("연결이 끊어졌습니다"), tr("다시 연결")) };
+    let lasted = tab.live_since.zip(tab.exited_at).map(|(from, to)| span(to.saturating_duration_since(from)));
+    let mut words = column![text(label).size(13).font(SEMIBOLD).color(theme::TEXT)].spacing(2);
+    let detail = match lasted {
+        Some(d) if local => tf("{0} 동안 실행되었습니다", &[&d]),
+        Some(d) => format!("{} · {}", tab.display_name(), tf("{0} 동안 연결되어 있었습니다", &[&d])),
+        None => tab.display_name().to_string(),
+    };
+    words = words.push(text(detail).size(11).color(theme::TEXT_3));
+    let icon = if local { &crate::icons::DOCK_TERMINAL } else { &crate::icons::UNPLUG };
     let card = container(
         row![
-            text("●").size(9).color(theme::ERR),
-            text(label).size(12.5),
-            Space::new().width(12),
+            icon_disc(icon, theme::ERR, 32.0),
+            words,
+            Space::new().width(16),
             btn(tr("탭 닫기"), Btn::Ghost, Some(Message::Close(tab.id))),
             btn(again, Btn::Primary, Some(Message::Retry(tab.id))),
         ]
-        .spacing(8)
+        .spacing(10)
         .align_y(Alignment::Center),
     )
-    .padding([8, 12])
-    .style(card_style(alpha(theme::ERR, 0.45)));
+    .padding([10, 14])
+    .style(|_| container::Style {
+        background: Some(Background::Color(alpha(theme::BG_1, 0.97))),
+        border: Border { color: alpha(theme::ERR, 0.45), width: 1.0, radius: R_CARD.into() },
+        shadow: iced::Shadow { color: alpha(theme::ERR, 0.18), offset: iced::Vector::new(0.0, 8.0), blur_radius: 28.0 },
+        ..Default::default()
+    });
+    let rise = tab.exited_at.map_or(1.0, |at| (at.elapsed().as_secs_f32() / BANNER_IN.as_secs_f32()).min(1.0));
+    let below = 36.0 * (1.0 - rise).powi(3);
+    let card = crate::motion::Shift::new(card, 0.96 + 0.04 * rise, iced::Vector::new(0.0, below), true);
     container(card).center_x(Length::Fill).align_bottom(Length::Fill).padding(EXITED_BANNER_BOTTOM).into()
 }
 
@@ -968,15 +1064,30 @@ fn search_bar(s: &Search) -> El<'_> {
 
 fn close_dialog(tab: &Tab) -> El<'_> {
     let running = tab.tunnels.len();
-    let mut col = column![
-        text(tf("{0} 연결을 닫을까요?", &[&tab.display_name()])).size(14),
-        muted(tr("서버에서 실행 중이던 작업이 중단될 수 있습니다.")),
-    ]
-    .spacing(6);
+    let colour = env_color(tab.env).unwrap_or(theme::ERR);
+    let since = tab.live_since.map(|at| tf("연결된 지 {0}", &[&span(at.elapsed())]));
+    let mut head = column![text(tf("{0} 연결을 닫을까요?", &[&tab.display_name()])).size(14).font(SEMIBOLD)].spacing(2);
+    if let Some(s) = since {
+        head = head.push(text(s).size(11).color(theme::TEXT_3));
+    }
+    let mut col = column![row![icon_disc(&crate::icons::UNPLUG, colour, 36.0), head].spacing(12).align_y(Alignment::Center)].spacing(10);
+    if tab.env == Env::Prod {
+        col = col.push(
+            container(row![crate::icons::tinted(&LOCK, 12.0, theme::ENV_PROD), text(tr("운영 서버입니다. 실행 중인 작업을 한 번 더 확인하세요.")).size(11.5).color(theme::TEXT)].spacing(8).align_y(Alignment::Center))
+                .padding([7, 10])
+                .width(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(alpha(theme::ENV_PROD, 0.12))),
+                    border: Border { color: alpha(theme::ENV_PROD, 0.35), width: 1.0, radius: 8.0.into() },
+                    ..Default::default()
+                }),
+        );
+    }
+    col = col.push(muted(tr("서버에서 실행 중이던 작업이 중단될 수 있습니다.")));
     if running > 0 {
         col = col.push(muted(tf("열어 둔 터널 {0}개도 함께 닫힙니다.", &[&running])));
     }
-    col = col.push(Space::new().height(8)).push(
+    col = col.push(Space::new().height(4)).push(
         row![
             Space::new().width(Length::Fill),
             btn(tr("취소"), Btn::Ghost, Some(Message::CloseCancel)),
@@ -984,7 +1095,7 @@ fn close_dialog(tab: &Tab) -> El<'_> {
         ]
         .spacing(8),
     );
-    container(col).padding(18).width(MODAL_W - 80.0).style(card_style(env_color(tab.env).map_or(theme::LINE_2, |c| alpha(c, 0.6)))).into()
+    container(col).padding(20).width(MODAL_W - 60.0).style(card_style(alpha(colour, 0.6))).into()
 }
 
 /// "Delete this server?", asked from the sidebar's right-click menu.
@@ -1021,45 +1132,256 @@ fn step_status(st: Step) -> (&'static str, Color, String) {
     }
 }
 
-/// Plain SSH is the common case: one line. Hops are listed only when there are jump hosts.
+/// Width of the card shown while a server connects.
+const CONNECT_W: f32 = 460.0;
+
+/// Connecting: the way there as a picture (this computer, any jump hosts, the server) with
+/// light running toward the server, then each step and how long it took.
 fn connect_card(tab: &Tab) -> El<'_> {
+    let t = crate::motion::seconds();
+    let colour = env_color(tab.env).unwrap_or(theme::ACCENT);
     let hops = tab.route.len().saturating_sub(1);
-    let mut col = column![text(tf("{0}에 연결 중", &[&tab.name])).size(14)].spacing(6);
-    if hops == 0 {
-        let (mark, color, status) = step_status(tab.steps.first().copied().unwrap_or(Step::Wait));
-        let target = tab.route.first().cloned().unwrap_or_default();
-        col = col.push(Space::new().height(4)).push(step_row(mark, color, target, status, color));
-    } else {
-        col = col.push(muted(tf("경유 서버 {0}곳을 거쳐 연결합니다", &[&hops])));
-        col = col.push(Space::new().height(4));
-        for (i, label) in tab.route.iter().enumerate() {
-            let (mark, color, status) = step_status(tab.steps.get(i).copied().unwrap_or(Step::Wait));
-            let name = if i + 1 == tab.route.len() { label.clone() } else { tf("{0}  (경유)", &[&label]) };
-            col = col.push(step_row(mark, color, name, status, color));
-        }
+    let target = tab.route.last().cloned().unwrap_or_default();
+    // Animated ellipsis: one, two, three dots.
+    let dots = ".".repeat(1 + (t * 2.5) as usize % 3);
+    let mut title = row![
+        text(tf("{0}에 연결 중", &[&tab.name])).size(15).font(SEMIBOLD),
+        text(dots).size(15).font(SEMIBOLD).color(theme::TEXT_2).width(Length::Fill),
+    ]
+    .align_y(Alignment::Center);
+    if let Some(c) = env_color(tab.env) {
+        title = title.push(container(text(tab.env.label()).size(10.5).font(MEDIUM).color(c)).padding([2, 8]).style(move |_| container::Style {
+            background: Some(Background::Color(alpha(c, 0.14))),
+            border: Border { color: alpha(c, 0.4), width: 1.0, radius: R_PILL.into() },
+            ..Default::default()
+        }));
     }
-    col = col.push(Space::new().height(8)).push(row![Space::new().width(Length::Fill), btn(tr("취소"), Btn::Ghost, Some(Message::Close(tab.id)))]);
-    container(col).padding(18).width(440).style(card_style(theme::LINE_2)).into()
+    let states: Vec<Step> = (0..tab.route.len()).map(|i| tab.steps.get(i).copied().unwrap_or(Step::Wait)).collect();
+    let route = Route { names: std::iter::once(tr("내 컴퓨터").to_string()).chain(tab.route.iter().cloned()).collect(), states: states.clone(), colour, t };
+    let done = states.iter().filter(|s| matches!(s, Step::Done(_))).count() as f32;
+    let working = states.iter().any(|s| matches!(s, Step::Connecting | Step::Authenticating));
+    let share = ((done + if working { 0.5 } else { 0.0 }) / states.len().max(1) as f32).min(1.0);
+    let mut col = column![
+        title,
+        mono(target, 11.5, theme::TEXT_3),
+        Space::new().height(4),
+        iced::widget::canvas(route).width(Length::Fill).height(ROUTE_H),
+        iced::widget::canvas(Progress { share, colour, t }).width(Length::Fill).height(6),
+        Space::new().height(2),
+    ]
+    .spacing(6);
+    if hops > 0 {
+        col = col.push(muted(tf("경유 서버 {0}곳을 거쳐 연결합니다", &[&hops])));
+    }
+    for (i, label) in tab.route.iter().enumerate() {
+        let name = if i + 1 == tab.route.len() || hops == 0 { label.clone() } else { tf("{0}  (경유)", &[&label]) };
+        col = col.push(step_row(states[i], name, t));
+    }
+    col = col.push(Space::new().height(6)).push(row![Space::new().width(Length::Fill), btn(tr("취소"), Btn::Ghost, Some(Message::Close(tab.id)))]);
+    container(col).padding(22).width(CONNECT_W).style(move |_| container::Style {
+        background: Some(Background::Color(theme::BG_1)),
+        border: Border { color: alpha(colour, 0.35), width: 1.0, radius: R_CARD.into() },
+        shadow: iced::Shadow { color: alpha(colour, 0.16), offset: iced::Vector::new(0.0, 12.0), blur_radius: 40.0 },
+        ..Default::default()
+    })
+    .into()
 }
 
-fn step_row<'a>(mark: &'a str, mark_color: Color, name: String, status: String, status_color: Color) -> El<'a> {
+fn step_row<'a>(st: Step, name: String, t: f32) -> El<'a> {
+    let (_, colour, status) = step_status(st);
     row![
-        container(text(mark).size(12).color(mark_color)).width(18),
-        mono(name, 12.0, theme::TEXT),
+        iced::widget::canvas(StepMark { st, t }).width(16).height(16),
+        mono(name, 12.0, if matches!(st, Step::Wait) { theme::TEXT_3 } else { theme::TEXT }),
         Space::new().width(Length::Fill),
-        text(status).size(11).color(status_color),
+        text(status).size(11).color(colour),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
     .into()
 }
 
+/// Height of the route picture.
+const ROUTE_H: f32 = 78.0;
+
+/// The way to the server: a node for this computer, each jump host and the server, joined
+/// by lines. Reached nodes and the lines to them glow; light runs along the line being made.
+struct Route {
+    names: Vec<String>,
+    /// The state of the step to each node after the first.
+    states: Vec<Step>,
+    colour: Color,
+    t: f32,
+}
+
+impl<M> iced::widget::canvas::Program<M> for Route {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::Point;
+        use iced::widget::canvas::{Frame, Path, Stroke, Text, path::Arc};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let n = self.names.len().max(2);
+        let (margin, y, r) = (34.0, 26.0, 11.0);
+        let x = |i: usize| margin + (bounds.width - 2.0 * margin) * i as f32 / (n - 1) as f32;
+        let last = n - 1;
+        // The lines first, under the nodes.
+        for i in 1..n {
+            let (a, b) = (Point::new(x(i - 1) + r, y), Point::new(x(i) - r, y));
+            let line = Path::line(a, b);
+            match self.states.get(i - 1).copied().unwrap_or(Step::Wait) {
+                Step::Done(_) => frame.stroke(&line, Stroke::default().with_width(2.0).with_color(alpha(self.colour, 0.85))),
+                Step::Wait => frame.stroke(&line, Stroke::default().with_width(1.5).with_color(alpha(theme::TEXT_3, 0.35))),
+                _ => {
+                    frame.stroke(&line, Stroke::default().with_width(1.5).with_color(alpha(self.colour, 0.3)));
+                    // Light running toward the server, a few sparks one after another.
+                    for k in 0..3 {
+                        let f = (self.t * 0.9 + k as f32 / 3.0).fract();
+                        let p = Point::new(a.x + (b.x - a.x) * f, y);
+                        let fade = (std::f32::consts::PI * f).sin();
+                        frame.fill(&Path::circle(p, 6.0), alpha(self.colour, 0.18 * fade));
+                        frame.fill(&Path::circle(p, 2.6), alpha(Color::WHITE, 0.95 * fade));
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            let c = Point::new(x(i), y);
+            // The first node is always there; the others as their step goes.
+            let st = if i == 0 { Step::Done(std::time::Duration::ZERO) } else { self.states.get(i - 1).copied().unwrap_or(Step::Wait) };
+            let tint = if i == last { self.colour } else { theme::ACCENT_TX };
+            match st {
+                Step::Done(_) => {
+                    frame.fill(&Path::circle(c, r + 5.0), alpha(tint, 0.14));
+                    frame.fill(&Path::circle(c, r), alpha(tint, 0.9));
+                    frame.fill(&Path::circle(c, 3.2), theme::BG_0);
+                }
+                Step::Wait => {
+                    frame.fill(&Path::circle(c, r), theme::BG_2);
+                    frame.stroke(&Path::circle(c, r), Stroke::default().with_width(1.5).with_color(alpha(theme::TEXT_3, 0.6)));
+                }
+                _ => {
+                    let breath = 0.5 + 0.5 * (self.t * 4.0).sin();
+                    frame.fill(&Path::circle(c, r + 4.0 + 3.0 * breath), alpha(tint, 0.12));
+                    frame.fill(&Path::circle(c, r), theme::BG_2);
+                    let start = self.t * 5.0;
+                    let arc = Path::new(|p| p.arc(Arc { center: c, radius: r, start_angle: iced::Radians(start), end_angle: iced::Radians(start + 3.6) }));
+                    frame.stroke(&arc, Stroke::default().with_width(2.2).with_color(tint));
+                    frame.fill(&Path::circle(c, 3.0), tint);
+                }
+            }
+            let name: String = self.names.get(i).map_or(String::new(), |s| if s.chars().count() > 16 { format!("{}…", s.chars().take(15).collect::<String>()) } else { s.clone() });
+            // The end labels lean inward so they never run off the card.
+            let (lx, align) = match i {
+                0 => (c.x - r, iced::alignment::Horizontal::Left),
+                _ if i == last => (c.x + r, iced::alignment::Horizontal::Right),
+                _ => (c.x, iced::alignment::Horizontal::Center),
+            };
+            frame.fill_text(Text {
+                content: name,
+                position: Point::new(lx, y + r + 16.0),
+                color: if matches!(st, Step::Wait) { theme::TEXT_3 } else { theme::TEXT_2 },
+                size: 10.5.into(),
+                font: crate::fonts::MONO,
+                align_x: align.into(),
+                align_y: iced::alignment::Vertical::Center,
+                ..Text::default()
+            });
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// How far along connecting is, with a shine running over the filled part.
+struct Progress {
+    share: f32,
+    colour: Color,
+    t: f32,
+}
+
+impl<M> iced::widget::canvas::Program<M> for Progress {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Path, gradient};
+        use iced::{Point, Size};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        frame.fill(&Path::rounded_rectangle(Point::ORIGIN, Size::new(w, h), (h / 2.0).into()), alpha(Color::WHITE, 0.07));
+        let filled = (w * self.share).max(h);
+        let shine = (self.t * 0.8).fract() * (filled + 60.0) - 30.0;
+        let g = gradient::Linear::new(Point::ORIGIN, Point::new(filled, 0.0))
+            .add_stop(0.0, alpha(self.colour, 0.6))
+            .add_stop(((shine - 30.0) / filled).clamp(0.0, 1.0), alpha(self.colour, 0.75))
+            .add_stop((shine / filled).clamp(0.0, 1.0), Color::WHITE)
+            .add_stop(((shine + 30.0) / filled).clamp(0.0, 1.0), alpha(self.colour, 0.9))
+            .add_stop(1.0, self.colour);
+        frame.fill(&Path::rounded_rectangle(Point::ORIGIN, Size::new(filled, h), (h / 2.0).into()), g);
+        vec![frame.into_geometry()]
+    }
+}
+
+/// A step's mark: a hollow ring waiting, a turning arc while it goes, a check once done.
+struct StepMark {
+    st: Step,
+    t: f32,
+}
+
+impl<M> iced::widget::canvas::Program<M> for StepMark {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::Point;
+        use iced::widget::canvas::{Frame, Path, Stroke, path::Arc};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let c = frame.center();
+        let r = bounds.width.min(bounds.height) / 2.0 - 1.5;
+        match self.st {
+            Step::Wait => frame.stroke(&Path::circle(c, r), Stroke::default().with_width(1.3).with_color(theme::TEXT_3)),
+            Step::Done(_) => {
+                frame.fill(&Path::circle(c, r + 1.0), alpha(theme::OK, 0.18));
+                let tick = Path::new(|p| {
+                    p.move_to(Point::new(c.x - r * 0.5, c.y));
+                    p.line_to(Point::new(c.x - r * 0.1, c.y + r * 0.42));
+                    p.line_to(Point::new(c.x + r * 0.55, c.y - r * 0.4));
+                });
+                frame.stroke(&tick, Stroke::default().with_width(1.8).with_color(theme::OK));
+            }
+            _ => {
+                frame.stroke(&Path::circle(c, r), Stroke::default().with_width(1.3).with_color(alpha(theme::ACCENT, 0.25)));
+                let start = self.t * 6.0;
+                let arc = Path::new(|p| p.arc(Arc { center: c, radius: r, start_angle: iced::Radians(start), end_angle: iced::Radians(start + 2.0) }));
+                frame.stroke(&arc, Stroke::default().with_width(1.8).with_color(theme::ACCENT));
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 fn failed_card<'a>(tab: &'a Tab, err: &'a str) -> El<'a> {
+    let reason = container(
+        column![text(tr("오류 내용")).size(10.5).font(MEDIUM).color(theme::TEXT_3), text(err.to_string()).size(12).font(crate::fonts::MONO).color(theme::ERR_TX)].spacing(4),
+    )
+    .padding([10, 12])
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(theme::BG_0)),
+        border: Border { color: alpha(theme::ERR, 0.35), width: 1.0, radius: 8.0.into() },
+        ..Default::default()
+    });
     container(
         column![
-            text(tf("{0}에 연결하지 못했습니다", &[&tab.name])).size(14).color(theme::ERR_TX),
-            text(err.to_string()).size(12).color(theme::TEXT_2),
-            Space::new().height(8),
+            row![
+                icon_disc(&X, theme::ERR, 36.0),
+                column![
+                    text(tf("{0}에 연결하지 못했습니다", &[&tab.name])).size(14).font(SEMIBOLD).color(theme::TEXT),
+                    mono(tab.route.last().cloned().unwrap_or_default(), 11.0, theme::TEXT_3),
+                ]
+                .spacing(2),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            reason,
+            Space::new().height(4),
             row![
                 Space::new().width(Length::Fill),
                 btn(tr("탭 닫기"), Btn::Ghost, Some(Message::Close(tab.id))),
@@ -1067,11 +1389,16 @@ fn failed_card<'a>(tab: &'a Tab, err: &'a str) -> El<'a> {
             ]
             .spacing(8),
         ]
-        .spacing(6),
+        .spacing(10),
     )
-    .padding(18)
+    .padding(22)
     .width(MODAL_W)
-    .style(card_style(alpha(theme::ERR, 0.45)))
+    .style(|_| container::Style {
+        background: Some(Background::Color(theme::BG_1)),
+        border: Border { color: alpha(theme::ERR, 0.45), width: 1.0, radius: R_CARD.into() },
+        shadow: iced::Shadow { color: alpha(theme::ERR, 0.14), offset: iced::Vector::new(0.0, 12.0), blur_radius: 40.0 },
+        ..Default::default()
+    })
     .into()
 }
 
