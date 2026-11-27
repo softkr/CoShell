@@ -202,6 +202,23 @@ fn scroll_style(theme: &Theme, status: scrollable::Status, area: u64) -> scrolla
     scrollable::Style { vertical_rail: rail, horizontal_rail: rail, ..scrollable::default(theme, status) }
 }
 
+/// `content` with a line of light along its upper edge, as glass catches it. The line
+/// fades out towards the corners, which are rounded by `radius`.
+pub(crate) fn lit<'a>(content: impl Into<El<'a>>, radius: f32) -> El<'a> {
+    let light = container(Space::new()).width(Length::Fill).height(1).style(|_| {
+        let across = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+            .add_stop(0.0, Color::TRANSPARENT)
+            .add_stop(0.2, alpha(Color::WHITE, EDGE_LIGHT))
+            .add_stop(0.8, alpha(Color::WHITE, EDGE_LIGHT))
+            .add_stop(1.0, Color::TRANSPARENT);
+        container::Style { background: Some(Background::Gradient(across.into())), ..Default::default() }
+    });
+    stack![content.into(), container(light).padding(Padding { top: 1.0, right: radius, bottom: 0.0, left: radius })].into()
+}
+
+/// How bright the light on a panel's upper edge is.
+const EDGE_LIGHT: f32 = 0.09;
+
 pub(crate) fn card_style(border_color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(theme::BG_2)),
@@ -371,10 +388,10 @@ fn divider<'a>(on_press: Message, line_right: bool, color: Color) -> El<'a> {
 }
 
 pub fn view(app: &CoShell) -> El<'_> {
-    // Toolbar across the top, then sidebar · terminal, then the status bar.
+    // Toolbar across the top, then dock · side panel · terminal, then the status bar.
     // Everything but the sidebar is opaque: the window itself is see-through on macOS.
     let work = container(column![tab_bar(app), body(app)].width(Length::Fill)).width(Length::Fill).height(Length::Fill).style(fill(theme::BG_0));
-    let mut cols = row![].height(Length::Fill);
+    let mut cols = row![crate::ui_sidebar::dock(app)].height(Length::Fill);
     if app.settings.sidebar_open {
         cols = cols.push(crate::ui_sidebar::sidebar(app)).push(divider(Message::SidebarResizeStart, true, theme::SIDEBAR));
     }

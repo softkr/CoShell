@@ -307,6 +307,7 @@ fn block_card<'a>(tab: &Tab, i: usize, b: &Block, meta: Option<&blocks::Meta>, h
         border: Border { color: if hovered { theme::LINE_2 } else { theme::LINE }, width: 1.0, radius: R_DOCK.into() },
         ..Default::default()
     });
+    let card = crate::ui::lit(card, R_DOCK);
     mouse_area(card).on_enter(Message::BlockHover(Some(i))).on_exit(Message::BlockHover(None)).into()
 }
 
@@ -479,12 +480,85 @@ const SHEET_W: f32 = 700.0;
 /// commands the assistant runs stay in view above it.
 const SHEET_MAX_PART: f32 = 0.5;
 const SHEET_R: f32 = 20.0;
+/// Space kept clear on each side of the sheet.
+const SHEET_MARGIN: f32 = 28.0;
+/// Width of the divider beside the side panel.
+const SIDE_EDGE: f32 = 4.0;
+/// How wide the sheet is while it rises, before it widens.
+const SHEET_START_W: f32 = 260.0;
+/// The entrance, as parts of its length: rising takes the first part, widening starts
+/// a little before the rise ends so the two run into each other.
+const INTRO_RISE: f32 = 0.5;
+const INTRO_WIDEN_FROM: f32 = 0.38;
+
+/// Fast at first, coming gently to rest.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Gentle at both ends.
+fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
+}
+
+/// Height of the wave along the sheet's top.
+const WAVE_H: f32 = 44.0;
+/// The wave's ribbons: colour, cycles across the sheet, share of the height, shift, width.
+const RIBBONS: [(Color, f32, f32, f32, f32); 3] = [
+    (alpha(theme::EMBER, 0.85), 1.6, 0.36, 0.0, 2.0),
+    (alpha(theme::SKY, 0.85), 2.1, 0.30, 2.1, 1.8),
+    (alpha(theme::PURPLE, 0.7), 1.3, 0.24, 4.2, 1.4),
+];
+
+/// The assistant's presence: three ribbons that drift while it waits and swell while it works,
+/// pinched to nothing at both ends.
+struct Wave {
+    phase: f32,
+    busy: bool,
+    /// Extra height as the conversation opens (1 → 0).
+    surge: f32,
+}
+
+impl iced::widget::canvas::Program<Message> for Wave {
+    type State = ();
+
+    fn draw(&self, _: &(), renderer: &iced::Renderer, _: &iced::Theme, bounds: iced::Rectangle, _: iced::mouse::Cursor) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::Point;
+        use iced::widget::canvas::{Frame, Path, Stroke};
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let swell = if self.busy { 1.5 } else { 0.8 } + 0.9 * self.surge;
+        for (colour, cycles, share, shift, width) in RIBBONS {
+            let ribbon = Path::new(|p| {
+                let steps = (w / 4.0).max(1.0) as usize;
+                for i in 0..=steps {
+                    let t = i as f32 / steps as f32;
+                    // Pinched at the ends, fullest in the middle.
+                    let envelope = (t * std::f32::consts::PI).sin().powi(2);
+                    let y = h / 2.0 + (t * cycles * std::f32::consts::TAU + self.phase + shift).sin() * h * share * swell * envelope;
+                    let at = Point::new(t * w, y.clamp(1.0, h - 1.0));
+                    if i == 0 { p.move_to(at) } else { p.line_to(at) }
+                }
+            });
+            frame.stroke(&ribbon, Stroke::default().with_color(colour).with_width(width));
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 /// Height of the fade under the sheet's top edge.
 const SHEET_FADE: f32 = 22.0;
 
+/// What is left of an entrance at `progress` (0 → 1): all of it at first, easing out to nothing.
+fn settle(progress: f32) -> f32 {
+    (1.0 - progress.clamp(0.0, 1.0)).powi(3)
+}
+
 /// The light along the dock's edge. It rests at one angle and travels round while a reply is coming.
 fn glow(app: &CoShell, working: bool) -> iced::gradient::Linear {
-    let angle = if working { app.fold / crate::ui_status::CYCLE_SECS * std::f32::consts::TAU } else { GLOW_REST };
+    // On opening the light makes one turn of the edge before it comes to rest.
+    let entrance = settle(app.chat_intro()) * std::f32::consts::TAU;
+    let angle = if working { app.fold / crate::ui_status::CYCLE_SECS * std::f32::consts::TAU } else { GLOW_REST + entrance };
     iced::gradient::Linear::new(iced::Radians(angle)).add_stop(0.0, theme::PURPLE).add_stop(0.5, theme::BLUE).add_stop(1.0, theme::TEAL)
 }
 
@@ -528,13 +602,15 @@ fn ask_row<'a>(app: &'a CoShell, tab: &'a Tab, q: &'a str) -> El<'a> {
         ..Default::default()
     });
     let edge = glow(app, working);
+    let flare = settle(app.chat_intro());
     container(inner)
         .padding(GLOW_W)
         .width(Length::Fill)
         .style(move |_| container::Style {
             background: Some(Background::Gradient(edge.into())),
             border: Border { radius: R_DOCK.into(), ..Default::default() },
-            shadow: iced::Shadow { color: alpha(theme::PURPLE, if working { 0.45 } else { 0.25 }), offset: iced::Vector::new(0.0, 4.0), blur_radius: 28.0 },
+            // It flares as the mode changes, then dims to its resting glow.
+            shadow: iced::Shadow { color: alpha(theme::PURPLE, if working { 0.45 } else { 0.25 } + 0.5 * flare), offset: iced::Vector::new(0.0, 4.0), blur_radius: 28.0 + 36.0 * flare },
             ..Default::default()
         })
         .into()
@@ -549,8 +625,26 @@ fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
         let into_sheet = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, theme::BG_3).add_stop(1.0, alpha(theme::BG_3, 0.0));
         container::Style { background: Some(Background::Gradient(into_sheet.into())), ..Default::default() }
     });
-    let talk = column![iced::widget::stack![talk, fade], crate::ui::rule(true), crate::ui_ai::sheet_tools(app, tab)];
-    let sheet = container(talk).max_width(SHEET_W).clip(true).style(|_| {
+    let entrance = settle(app.chat_intro());
+    let wave = iced::widget::canvas::Canvas::new(Wave { phase: app.wave, busy: tab.chat.is_streaming(), surge: entrance }).width(Length::Fill).height(WAVE_H);
+    let talk = column![wave, crate::ui::rule(true), iced::widget::stack![talk, fade], crate::ui::rule(true), crate::ui_ai::sheet_tools(app, tab)];
+    // The conversation is laid out at its final width from the first frame, so nothing
+    // re-wraps while the sheet opens: the sheet is a window on it that grows.
+    let side = if app.settings.sidebar_open { app.settings.sidebar_width + SIDE_EDGE } else { 0.0 };
+    let full_w = (app.settings.window.width - crate::ui_sidebar::DOCK_W - side - 2.0 * SHEET_MARGIN).clamp(SHEET_START_W, SHEET_W);
+    let intro = app.chat_intro();
+    // First it rises from the middle of the dock, narrow; then it widens to both sides.
+    let rise = ease_out((intro / INTRO_RISE).min(1.0));
+    let widen = ease_in_out(((intro - INTRO_WIDEN_FROM) / (1.0 - INTRO_WIDEN_FROM)).clamp(0.0, 1.0));
+    let opening = intro < 1.0;
+    let talk = container(talk).width(full_w);
+    let talk: El<'a> = if opening {
+        let width = SHEET_START_W + (full_w - SHEET_START_W) * widen;
+        crate::reveal::Reveal::new(talk, full_w, width, (app.settings.window.height * rise).max(1.0)).into()
+    } else {
+        talk.into()
+    };
+    let sheet = container(talk).clip(true).style(|_| {
         let glass = iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, alpha(theme::BG_3, 0.9)).add_stop(1.0, alpha(theme::BG_1, 0.94));
         container::Style {
             background: Some(Background::Gradient(glass.into())),
@@ -561,7 +655,7 @@ fn chat_sheet<'a>(app: &'a CoShell, tab: &'a Tab) -> El<'a> {
         }
     });
     // Clicks on the sheet stay on it; around it the terminal is still within reach.
-    container(iced::widget::opaque(sheet)).center_x(Length::Fill).align_bottom(Length::Fill).padding(Padding { top: 24.0, right: 28.0, bottom: 4.0, left: 28.0 }).into()
+    container(iced::widget::opaque(sheet)).center_x(Length::Fill).align_bottom(Length::Fill).padding(Padding { top: 24.0, right: SHEET_MARGIN, bottom: 4.0, left: SHEET_MARGIN }).into()
 }
 
 /// Padding around the dock at the bottom of the terminal.
@@ -641,11 +735,14 @@ pub fn view<'a>(app: &'a CoShell, tab: &'a Tab, screen: Screen) -> El<'a> {
     if let Some(d) = dock {
         layers = layers.push(d);
     }
-    container(layers)
+    // The glow lies on a solid ground (the terminal itself is underneath and must not show), the cards on the glow.
+    let glow = iced::widget::image(std::sync::LazyLock::force(&crate::icons::AURA).clone())
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_| container::Style { background: Some(Background::Color(theme::BG_0)), text_color: Some(theme::TEXT), ..Default::default() })
-        .into()
+        .content_fit(iced::ContentFit::Fill);
+    let ground = container(glow).width(Length::Fill).height(Length::Fill).style(crate::ui::fill(theme::BG_0));
+    let cards = container(layers).width(Length::Fill).height(Length::Fill).style(|_| container::Style { text_color: Some(theme::TEXT), ..Default::default() });
+    iced::widget::stack![ground, cards].into()
 }
 
 #[cfg(test)]
@@ -684,6 +781,19 @@ mod tests {
 #[cfg(test)]
 mod system_tests {
     use super::*;
+
+    #[test]
+    fn an_entrance_starts_whole_and_eases_out_to_nothing() {
+        assert_eq!(settle(0.0), 1.0);
+        assert_eq!(settle(1.0), 0.0);
+        assert!(settle(0.5) < 0.5, "most of the movement comes early");
+        assert!(settle(0.2) > settle(0.6));
+        assert_eq!(settle(7.0), 0.0, "never past the end");
+        for ease in [ease_out as fn(f32) -> f32, ease_in_out] {
+            assert_eq!((ease(0.0), ease(1.0)), (0.0, 1.0));
+            assert!(ease(0.3) < ease(0.6), "always forward");
+        }
+    }
 
     #[test]
     fn systems_are_told_apart_by_name() {

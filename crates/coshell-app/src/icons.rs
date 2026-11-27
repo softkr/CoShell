@@ -29,6 +29,10 @@ svg_handle!(KEY, "icons/key.svg");
 svg_handle!(ZAP, "icons/zap.svg");
 svg_handle!(TRASH, "icons/trash.svg");
 svg_handle!(ERASER, "icons/eraser.svg");
+// The dock's own icons.
+svg_handle!(DOCK_TERMINAL, "icons/dock-terminal.svg");
+svg_handle!(SPARKLES, "icons/sparkles.svg");
+svg_handle!(GRID, "icons/grid.svg");
 svg_handle!(SEARCH, "icons/search.svg");
 svg_handle!(LOCK, "icons/lock.svg");
 svg_handle!(LOCK_OPEN, "icons/lock-open.svg");
@@ -58,6 +62,9 @@ svg_handle!(GIT_BRANCH, "icons/git-branch.svg");
 svg_handle!(OS_MAC, "icons/os-mac.svg");
 svg_handle!(OS_WINDOWS, "icons/os-windows.svg");
 svg_handle!(OS_LINUX, "icons/os-linux.svg");
+
+/// Soft glows of colour on the terminal's background: small, and stretched to fit (it has no detail to lose).
+pub static AURA: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| iced::widget::image::Handle::from_bytes(asset!("png/aura.png").as_slice()));
 
 /// 256px PNG for the window / taskbar icon (Windows, Linux; macOS uses the bundle's .icns).
 const WINDOW_ICON_PNG: &[u8] = asset!("png/coshell-256.png");

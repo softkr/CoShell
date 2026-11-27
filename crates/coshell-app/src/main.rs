@@ -12,6 +12,7 @@ mod metrics;
 mod conn;
 mod files;
 mod form;
+mod reveal;
 mod context_menu;
 mod fonts;
 mod hangul;

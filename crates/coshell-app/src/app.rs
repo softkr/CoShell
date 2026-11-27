@@ -77,6 +77,14 @@ const SCROLLBAR_LINGER: Duration = Duration::from_millis(900);
 const SCROLLBAR_TICK: Duration = Duration::from_millis(100);
 const SCROLLBAR_FADE: Duration = Duration::from_millis(350);
 const SCROLLBAR_FADE_TICK: Duration = Duration::from_millis(16);
+/// The conversation's wave: how often it moves, how far each time (resting / while a reply
+/// is coming), and where its phase wraps (a common multiple of the ribbons' cycles).
+const WAVE_TICK: Duration = Duration::from_millis(33);
+/// How long the conversation takes to make its entrance.
+const CHAT_INTRO: Duration = Duration::from_millis(620);
+const WAVE_STEP: f32 = 0.035;
+const WAVE_STEP_BUSY: f32 = 0.12;
+const WAVE_PERIOD: f32 = std::f32::consts::TAU * 100.0;
 /// A longer pause between frames means the fold stopped: start it over from flat.
 const FOLD_RESTART: Duration = Duration::from_millis(250);
 pub fn prompt_input_id(i: usize) -> String {
@@ -478,6 +486,14 @@ pub struct CoShell {
     fold_clock: Option<(std::time::Instant, std::time::Instant)>,
     /// When a scroll area last moved, while its scrollbar is showing.
     scrolled_at: Option<std::time::Instant>,
+    /// How far along the conversation's wave is (radians): it drifts while the sheet is
+    /// open and runs while a reply is coming.
+    pub wave: f32,
+    /// The tab whose conversation is open, and since when (its entrance plays from then).
+    chat_opened: Option<(TabId, std::time::Instant)>,
+    /// A moment of the conversation's entrance to show (tests).
+    #[cfg(test)]
+    pub intro_at: Option<f32>,
 }
 
 /// A draggable divider between panes.
@@ -585,6 +601,10 @@ pub enum Message {
     AiResizeEnd,
     /// Show / hide the left sidebar.
     SidebarToggle,
+    /// A panel's button on the dock.
+    DockTab(SidebarTab),
+    /// Next step of the conversation's wave.
+    WaveTick,
     /// Show / hide the status bar.
     StatusBarToggle,
     SidebarTab(SidebarTab),
@@ -953,6 +973,10 @@ impl CoShell {
             fold: 0.0,
             fold_clock: None,
             scrolled_at: None,
+            wave: 0.0,
+            chat_opened: None,
+            #[cfg(test)]
+            intro_at: None,
             block_hover: None,
             ask: None,
             ask_joined: false,
@@ -1492,6 +1516,15 @@ impl CoShell {
         }
     }
 
+    /// How far the conversation's entrance has played: 0 as it opens, 1 once it has settled.
+    pub fn chat_intro(&self) -> f32 {
+        // Tests look at the conversation the moment it opens: they see it settled, unless they set a moment of the entrance.
+        #[cfg(test)]
+        return self.intro_at.unwrap_or(1.0);
+        #[cfg(not(test))]
+        self.chat_opened.map_or(1.0, |(_, at)| (at.elapsed().as_secs_f32() / CHAT_INTRO.as_secs_f32()).min(1.0))
+    }
+
     /// Show the conversation for `id`: the chat sheet over its terminal, with the dock in
     /// question mode. What is already typed there stays.
     fn open_chat(&mut self, id: TabId) -> Task<Message> {
@@ -1846,6 +1879,11 @@ impl CoShell {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        // The conversation just opened for a tab (however it was opened): its entrance starts now.
+        let chatting = self.ask.as_ref().map(|(id, _)| *id);
+        if chatting != self.chat_opened.map(|(id, _)| id) {
+            self.chat_opened = chatting.map(|id| (id, std::time::Instant::now()));
+        }
         // Whatever just happened may have put a connected tab's file panel on screen.
         Task::batch([task, self.ensure_files()])
     }
@@ -2034,9 +2072,11 @@ impl CoShell {
                 let w = self.settings.window.width;
                 match self.resizing {
                     Some(Divider::Sidebar) => {
-                        let room = (w - TERMINAL_MIN_W).max(settings::SIDEBAR_W_MIN);
+                        // The panel starts where the dock ends.
+                        let dock = crate::ui_sidebar::DOCK_W;
+                        let room = (w - dock - TERMINAL_MIN_W).max(settings::SIDEBAR_W_MIN);
                         let max = settings::SIDEBAR_W_MAX.min(room);
-                        self.settings.sidebar_width = x.clamp(settings::SIDEBAR_W_MIN, max);
+                        self.settings.sidebar_width = (x - dock).clamp(settings::SIDEBAR_W_MIN, max);
                     }
                     None => return Task::none(),
                 }
@@ -2060,6 +2100,20 @@ impl CoShell {
             Message::SidebarTab(t) => {
                 self.sidebar_tab = t;
                 Task::none()
+            }
+            Message::WaveTick => {
+                let busy = self.active_tab().is_some_and(|t| t.chat.is_streaming());
+                self.wave = (self.wave + if busy { WAVE_STEP_BUSY } else { WAVE_STEP }) % WAVE_PERIOD;
+                Task::none()
+            }
+            // The dock: a panel's button opens it, and closes it when it is the one showing.
+            Message::DockTab(t) => {
+                if self.settings.sidebar_open && self.sidebar_tab == t {
+                    return self.update(Message::SidebarToggle);
+                }
+                self.settings.sidebar_open = true;
+                self.state_dirty = true;
+                self.update(Message::SidebarTab(t))
             }
             Message::GroupToggle(g) => {
                 match self.collapsed_groups.iter().position(|x| *x == g) {
@@ -3544,6 +3598,13 @@ impl CoShell {
             }
             _ => Subscription::none(),
         };
+        // The wave lives only while the conversation is on screen.
+        // Every frame while it makes its entrance, then at the wave's own pace.
+        let wave = match (chat_shown, self.chat_intro() < 1.0) {
+            (true, true) => iced::window::frames().map(|_| Message::WaveTick),
+            (true, false) => iced::time::every(WAVE_TICK).map(|_| Message::WaveTick),
+            (false, _) => Subscription::none(),
+        };
         let branch = if self.settings.block_view && self.live_tab().is_some() { iced::time::every(crate::branch::EVERY).map(|_| Message::BranchTick) } else { Subscription::none() };
         // Coarse while the bar just stays; every frame while it fades.
         let scrollbar = match self.scrolled_at {
@@ -3551,7 +3612,7 @@ impl CoShell {
             Some(_) => iced::time::every(SCROLLBAR_TICK).map(|_| Message::ScrollbarTick),
             None => Subscription::none(),
         };
-        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow, scrollbar, branch])
+        Subscription::batch([event::listen_with(on_event), tick, persist, notice, resize, menu, updates, stats, blocks, blink, glance, fold, transfers, edits, follow, scrollbar, branch, wave])
     }
 }
 

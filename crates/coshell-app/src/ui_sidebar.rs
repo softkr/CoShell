@@ -70,31 +70,8 @@ pub fn sidebar(app: &CoShell) -> El<'_> {
     container(col).width(app.settings.sidebar_width).height(Length::Fill).style(fill(theme::SIDEBAR)).into()
 }
 
-/// Segmented 서버 | 스니펫 switch, then add and search.
+/// The panel's name (the dock picks which panel) and its add button.
 fn head(app: &CoShell) -> El<'_> {
-    let seg = |label: &'static str, t: SidebarTab| {
-        let on = app.sidebar_tab == t;
-        button(container(text(tr(label)).size(11.5).font(if on { SEMIBOLD } else { crate::ui::MEDIUM })).center_x(Length::Fill))
-            .width(Length::Fill)
-            .padding([4, 10])
-            .on_press(Message::SidebarTab(t))
-            .style(move |_, st| button::Style {
-                background: on.then_some(Background::Color(alpha(Color::WHITE, 0.16))),
-                text_color: if on { theme::SLATE_100 } else if matches!(st, button::Status::Hovered) { theme::TEXT } else { theme::TEXT_2 },
-                border: Border { radius: 6.0.into(), ..Default::default() },
-                shadow: if on {
-                    iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.25), offset: iced::Vector::new(0.0, 1.0), blur_radius: 2.0 }
-                } else {
-                    iced::Shadow::default()
-                },
-                ..Default::default()
-            })
-    };
-    let switch = container(row![seg("서버", SidebarTab::Servers), seg("스니펫", SidebarTab::Snippets), seg("파일", SidebarTab::Files)]).padding(2).width(Length::Fill).style(|_| container::Style {
-        background: Some(Background::Color(alpha(Color::WHITE, 0.07))),
-        border: Border { color: theme::LINE, width: 1.0, radius: crate::ui::R_ROW.into() },
-        ..Default::default()
-    });
     let icon = |h: &'static std::sync::LazyLock<iced::widget::svg::Handle>, size: f32, label: &'static str, msg: Message| -> El<'static> {
         let b = button(container(crate::icons::tinted(h, size, theme::TEXT_2)).center(28)).padding(0).on_press(msg).style(|_, st| button::Style {
             background: Some(Background::Color(if matches!(st, button::Status::Hovered) { theme::BG_3 } else { theme::BG_2 })),
@@ -103,20 +80,68 @@ fn head(app: &CoShell) -> El<'_> {
         });
         crate::ui::tip(b, label, iced::widget::tooltip::Position::Bottom)
     };
-    let add = match app.sidebar_tab {
-        SidebarTab::Snippets => icon(&PLUS, 16.0, tr("스니펫 추가"), Message::SnippetNew),
-        _ => icon(&PLUS, 16.0, tr("새 호스트 추가"), Message::HostNewIn(None)),
+    let (name, add) = match app.sidebar_tab {
+        SidebarTab::Servers => (tr("서버"), Some(icon(&PLUS, 16.0, tr("새 호스트 추가"), Message::HostNewIn(None)))),
+        SidebarTab::Snippets => (tr("스니펫"), Some(icon(&PLUS, 16.0, tr("스니펫 추가"), Message::SnippetNew))),
+        SidebarTab::Files => (tr("파일"), None),
     };
-    container(
-        row![
-            switch,
-            add,
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding(Padding { top: 12.0, right: 12.0, bottom: 10.0, left: 12.0 })
-    .into()
+    let mut line = row![text(name).size(13).font(SEMIBOLD).color(theme::TEXT), Space::new().width(Length::Fill)].align_y(Alignment::Center).height(28);
+    if let Some(add) = add {
+        line = line.push(add);
+    }
+    container(line).padding(Padding { top: 12.0, right: 12.0, bottom: 10.0, left: 14.0 }).into()
+}
+
+/// Width of the dock's column, and the side of its buttons.
+pub const DOCK_W: f32 = 60.0;
+const DOCK_BTN: f32 = 40.0;
+const DOCK_R: f32 = 16.0;
+
+/// One of the dock's buttons. `lit`: what it opens is showing, so it is tinted with
+/// `tone` and a bar of that colour stands beside it.
+fn dock_item<'a>(icon: &'static std::sync::LazyLock<iced::widget::svg::Handle>, label: &'a str, lit: Option<(Color, Color)>, msg: Message) -> El<'a> {
+    let on = lit.is_some();
+    let (tone, ink) = lit.unwrap_or((Color::WHITE, theme::SLATE_300));
+    let b = button(container(crate::icons::tinted(icon, 20.0, ink)).center(DOCK_BTN)).padding(0).on_press(msg).style(move |_, st| {
+        let hover = matches!(st, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(alpha(tone, if on { 0.2 } else if hover { 0.12 } else { 0.055 }))),
+            border: Border { color: if on { alpha(tone, 0.45) } else { theme::LINE }, width: 1.0, radius: 12.0.into() },
+            ..Default::default()
+        }
+    });
+    let bar = container(Space::new()).width(3).height(16).style(move |_| container::Style {
+        background: on.then_some(Background::Color(tone)),
+        border: Border { radius: crate::ui::R_PILL.into(), ..Default::default() },
+        ..Default::default()
+    });
+    row![bar, crate::ui::tip(b, label, iced::widget::tooltip::Position::Right)].spacing(3).align_y(Alignment::Center).into()
+}
+
+/// The dock down the left edge: what the side panel shows (servers, snippets, files),
+/// the conversation, the search, and the settings at the foot. More views take a button each.
+pub fn dock(app: &CoShell) -> El<'_> {
+    let ember = (theme::EMBER, theme::EMBER_HI);
+    let panel = |tab: SidebarTab| (app.settings.sidebar_open && app.sidebar_tab == tab).then_some(ember);
+    let chat = app.ask.as_ref().is_some_and(|(id, _)| Some(*id) == app.active).then_some((theme::SKY, theme::SKY));
+    let top = column![
+        dock_item(&crate::icons::DOCK_TERMINAL, tr("서버"), panel(SidebarTab::Servers), Message::DockTab(SidebarTab::Servers)),
+        dock_item(&crate::icons::ZAP, tr("스니펫"), panel(SidebarTab::Snippets), Message::DockTab(SidebarTab::Snippets)),
+        dock_item(&crate::icons::FOLDER, tr("파일"), panel(SidebarTab::Files), Message::DockTab(SidebarTab::Files)),
+        dock_item(&crate::icons::SPARKLES, tr("AI 대화 (⌘L)"), chat, Message::AiToggle),
+        dock_item(&SEARCH, tr("서버 검색 · 명령 (⌘K)"), None, Message::OpenPalette),
+    ]
+    .spacing(8);
+    let foot = dock_item(&crate::icons::GRID, tr("설정 (⌘,)"), None, Message::SettingsOpen);
+    let pill = container(column![top, Space::new().height(Length::Fill), foot])
+        .padding(Padding { top: 8.0, right: 6.0, bottom: 8.0, left: 0.0 })
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(Background::Color(alpha(Color::WHITE, 0.035))),
+            border: Border { color: theme::LINE, width: 1.0, radius: DOCK_R.into() },
+            ..Default::default()
+        });
+    container(crate::ui::lit(pill, DOCK_R)).padding(Padding { top: 8.0, right: 4.0, bottom: 8.0, left: 4.0 }).width(DOCK_W).height(Length::Fill).style(fill(theme::SIDEBAR)).into()
 }
 
 fn chevron<'a>(open: bool, color: Color) -> El<'a> {

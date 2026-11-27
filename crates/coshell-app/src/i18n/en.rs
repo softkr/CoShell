@@ -4,6 +4,8 @@ pub fn en(s: &str) -> Option<&'static str> {
     Some(match s {
         "AI 대화" => "AI conversation",
         "AI 대화 (⌘L)" => "AI conversation (⌘L)",
+        "서버 검색 · 명령 (⌘K)" => "Search servers · commands (⌘K)",
+        "설정 (⌘,)" => "Settings (⌘,)",
         "{0}–{1}줄" => "{0}–{1} lines",
         "글씨 모양" => "Text appearance",
         "바로 가기" => "Shortcuts",

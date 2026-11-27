@@ -1223,8 +1223,8 @@ fn mouse(e: iced::mouse::Event) -> iced::Event {
 
 /// A point inside the terminal grid on every platform's chrome layout.
 const IN_TERMINAL_Y: f32 = 200.0;
-/// Left edge of the terminal: right of the server sidebar and its divider.
-const TERM_LEFT: f32 = crate::settings::SIDEBAR_W_DEFAULT + 4.0;
+/// Left edge of the terminal: right of the dock, the side panel and its divider.
+const TERM_LEFT: f32 = crate::ui_sidebar::DOCK_W + crate::settings::SIDEBAR_W_DEFAULT + 4.0;
 
 #[test]
 fn dragging_selects_text_and_typing_clears_it() {
@@ -1357,7 +1357,8 @@ fn sidebar_width_follows_its_divider_within_limits() {
     let mut app = app();
     let _ = app.update(Message::WindowResized(iced::Size::new(1400.0, 800.0)));
     let _ = app.update(Message::SidebarResizeStart);
-    let _ = app.update(Message::AiResizeTo(300.0));
+    // The panel starts where the dock ends.
+    let _ = app.update(Message::AiResizeTo(crate::ui_sidebar::DOCK_W + 300.0));
     assert_eq!(app.settings.sidebar_width, 300.0);
     let _ = app.update(Message::AiResizeTo(10.0));
     assert_eq!(app.settings.sidebar_width, SIDEBAR_W_MIN);
@@ -2733,4 +2734,43 @@ fn prompt_dock_shows_system_folder_and_branch() {
     assert_eq!(app.tabs.iter().find(|t| t.id == id).unwrap().git.branch, None);
     let _ = app.update(Message::BranchFound(id, key, Some("main".into())));
     simulator(ui::view(&app)).find("main").expect("the branch");
+}
+
+#[test]
+fn dock_opens_panels_and_closes_the_one_showing() {
+    use crate::app::SidebarTab;
+    let mut app = app();
+    let id = app.open_local();
+    assert!(app.settings.sidebar_open && app.sidebar_tab == SidebarTab::Servers);
+    // Another panel's button: the side panel shows that one.
+    let _ = app.update(Message::DockTab(SidebarTab::Snippets));
+    assert!(app.settings.sidebar_open && app.sidebar_tab == SidebarTab::Snippets);
+    simulator(ui::view(&app)).find("스니펫").expect("the snippets panel, by its name");
+    // The button of the panel showing: the side panel closes; again, and it is back.
+    let _ = app.update(Message::DockTab(SidebarTab::Snippets));
+    assert!(!app.settings.sidebar_open);
+    let _ = app.update(Message::DockTab(SidebarTab::Snippets));
+    assert!(app.settings.sidebar_open && app.sidebar_tab == SidebarTab::Snippets);
+    // The conversation has a button there too.
+    let _ = app.update(Message::AiToggle);
+    assert_eq!(app.ask, Some((id, "#".to_string())));
+    // (The app knows its window's size from the window; here it is told the simulator's.)
+    let _ = app.update(Message::WindowResized(iced::Size::new(1024.0, 768.0)));
+    // Its entrance: narrow while it rises from the middle of the dock, then as wide as it will be.
+    let width_at = |app: &mut CoShell, at: f32, name: &str| {
+        app.intro_at = Some(at);
+        let mut ui = simulator(ui::view(app));
+        if let Ok(dir) = std::env::var("COSHELL_SNAPSHOT_DIR") {
+            let _ = ui.snapshot(&iced::Theme::Dark).unwrap().matches_image(Path::new(&dir).join(name));
+        }
+        ui.find("컨텍스트 연동").map(|t| t.bounds().x).ok()
+    };
+    let (rising, widening, settled) = (width_at(&mut app, 0.3, "chat-intro-rise"), width_at(&mut app, 0.75, "chat-intro-widen"), width_at(&mut app, 1.0, "chat-intro-done"));
+    assert_eq!(rising, settled, "what is said is laid out once: nothing re-wraps while the sheet opens");
+    assert_eq!(widening, settled);
+    app.intro_at = None;
+    // While it is open its wave moves; closed, nothing ticks.
+    let before = app.wave;
+    let _ = app.update(Message::WaveTick);
+    assert!(app.wave > before);
 }

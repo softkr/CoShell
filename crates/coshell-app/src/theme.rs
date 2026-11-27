@@ -1,5 +1,5 @@
-//! Design tokens from coshell_ai_native_ssh_terminal.html (dark appearance): macOS system
-//! colours, near-black surfaces, hairline separators drawn as translucent white.
+//! Design tokens (dark appearance): macOS system colours on near-black surfaces with a
+//! little aubergine in them, hairline separators drawn as translucent white.
 
 use iced::Color;
 
@@ -10,10 +10,15 @@ const fn hex(rgb: u32) -> Color {
 const WHITE: Color = Color::WHITE;
 
 // surfaces: terminal canvas / bars and panels / elevated controls / hover
-pub const BG_0: Color = hex(0x111215);
-pub const BG_1: Color = hex(0x18181B);
-pub const BG_2: Color = hex(0x232326);
-pub const BG_3: Color = hex(0x2C2C2F);
+pub const BG_0: Color = hex(0x100E14);
+pub const BG_1: Color = hex(0x17141C);
+pub const BG_2: Color = hex(0x211D29);
+pub const BG_3: Color = hex(0x2B2734);
+/// The dock's lit item: an ember against the aubergine (not the amber that marks production).
+pub const EMBER: Color = hex(0xE95420);
+pub const EMBER_HI: Color = hex(0xFF7043);
+/// The assistant's dock item.
+pub const SKY: Color = hex(0x38BDF8);
 /// Cards on the canvas (command blocks, chat bubbles): a faint lift.
 pub const CARD: Color = alpha(WHITE, 0.035);
 /// Chips and quiet buttons inside cards.
@@ -60,7 +65,7 @@ pub const ENV_DEV: Color = GREEN;
 /// transparent there, see `main.rs`); a plain panel elsewhere.
 /// Dense enough that a bright window or wallpaper behind it still leaves a dark panel:
 /// over white it comes out near #2B2B2D, so tertiary labels stay legible.
-pub const SIDEBAR: Color = if cfg!(target_os = "macos") { alpha(hex(0x18181B), 0.92) } else { hex(0x151518) };
+pub const SIDEBAR: Color = if cfg!(target_os = "macos") { alpha(hex(0x17141C), 0.92) } else { hex(0x141118) };
 pub const SCRIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.45 };
 
 /// `c` at `alpha` opacity.
