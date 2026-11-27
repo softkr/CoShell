@@ -285,10 +285,27 @@ fn volume_used(path: &str) -> Option<u8> {
     })
 }
 
+/// One second of this computer's figures, read the way a server's are: the watcher's lines
+/// twice, half a second apart, through the same `Sampler`.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn local_now() -> Result<Stats, String> {
-    parse_linux(&sh(LINUX_SCRIPT)).ok_or_else(|| "unsupported system".to_string())
+    linux_twice(|| sh(LOCAL_LINUX_SCRIPT), Duration::from_millis(500))
 }
+
+/// Two readings `apart`, the second compared with the first. Built on macOS too (in tests),
+/// so a change that breaks the Linux build shows up here.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn linux_twice(read: impl Fn() -> String, apart: Duration) -> Result<Stats, String> {
+    let mut sampler = Sampler::default();
+    sampler.feed(&read());
+    std::thread::sleep(apart);
+    sampler.feed(&read()).ok_or_else(|| "unsupported system".to_string())
+}
+
+/// One turn of the watcher's loop, with the OS name and the disk every time (Linux).
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+const LOCAL_LINUX_SCRIPT: &str = ". /etc/os-release 2>/dev/null; echo \"OS=$PRETTY_NAME\"; head -n1 /proc/stat; \
+grep -E '^(MemTotal|MemAvailable):' /proc/meminfo; df -P /var 2>/dev/null | tail -n1";
 
 #[cfg(windows)]
 fn local_now() -> Result<Stats, String> {
@@ -316,6 +333,21 @@ MemTotal:       16000000 kB\nMemAvailable:    6000000 kB\n\
         let s = w.feed("cpu  150 0 150 840 110 0 0 0 0 0\nMemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n").unwrap();
         assert_eq!((s.cpu, s.mem), (0, 50));
         assert_eq!(w.feed("garbage"), None);
+    }
+
+    #[test]
+    fn this_linux_computer_is_read_twice_like_a_server() {
+        assert!(LOCAL_LINUX_SCRIPT.contains("/proc/stat") && LOCAL_LINUX_SCRIPT.contains("MemAvailable") && LOCAL_LINUX_SCRIPT.contains("df -P"));
+        let turn = std::cell::Cell::new(0);
+        let read = || {
+            turn.set(turn.get() + 1);
+            let busy = if turn.get() == 1 { 100 } else { 150 };
+            format!("OS=Debian GNU/Linux 12\ncpu  {busy} 0 {busy} 700 100 0 0 0 0 0\nMemTotal: 1000 kB\nMemAvailable: 250 kB\n/dev/sda1 100 40 60 40% /\n")
+        };
+        let s = linux_twice(read, Duration::ZERO).unwrap();
+        assert_eq!((s.cpu, s.mem, s.disk), (100, 75, 40));
+        assert_eq!(s.os.as_deref(), Some("Debian GNU/Linux 12"));
+        assert!(linux_twice(|| "nothing".into(), Duration::ZERO).is_err());
     }
 
     #[test]
