@@ -90,6 +90,53 @@ async fn upload_replaces_a_file_and_keeps_its_permissions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uploads_a_folder_into_one_already_there() {
+    let root = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let site = local.path().join("site");
+    std::fs::create_dir_all(site.join("assets/img")).unwrap();
+    std::fs::create_dir(site.join("empty")).unwrap();
+    std::fs::write(site.join("index.html"), b"<p>new").unwrap();
+    std::fs::write(site.join("assets/a.css"), b"a{}").unwrap();
+    std::fs::write(site.join("assets/img/logo.png"), vec![7u8; 100_000]).unwrap();
+    #[cfg(unix)]
+    {
+        // A link to a file brings its content; a link to a folder could loop and is left out.
+        std::os::unix::fs::symlink(site.join("index.html"), site.join("home.html")).unwrap();
+        std::os::unix::fs::symlink(&site, site.join("assets/loop")).unwrap();
+    }
+    // The server already has the folder: its other files stay, same names are replaced.
+    std::fs::create_dir(root.path().join("site")).unwrap();
+    std::fs::write(root.path().join("site/index.html"), b"old").unwrap();
+    std::fs::write(root.path().join("site/keep.txt"), b"keep").unwrap();
+    let (conn, _kh) = connect(root.path(), true).await;
+    let sftp = conn.sftp().await.unwrap();
+
+    let p = TransferProgress::default();
+    sftp.upload_dir(&site, "/site", &p).await.unwrap();
+    let r = root.path().join("site");
+    assert_eq!(std::fs::read(r.join("index.html")).unwrap(), b"<p>new");
+    assert_eq!(std::fs::read(r.join("keep.txt")).unwrap(), b"keep");
+    assert_eq!(std::fs::read(r.join("assets/a.css")).unwrap(), b"a{}");
+    assert_eq!(std::fs::read(r.join("assets/img/logo.png")).unwrap().len(), 100_000);
+    assert!(r.join("empty").is_dir());
+    let mut expected = 6 + 3 + 100_000;
+    #[cfg(unix)]
+    {
+        assert_eq!(std::fs::read(r.join("home.html")).unwrap(), b"<p>new");
+        assert!(!r.join("assets/loop").exists());
+        expected += 6;
+    }
+    assert_eq!((p.done(), p.total()), (expected, expected), "progress counts the whole folder");
+
+    // Cancelled: stops with nothing half-written.
+    let p = TransferProgress::default();
+    p.cancel();
+    assert!(matches!(sftp.upload_dir(&site, "/copy", &p).await, Err(SshError::Cancelled(_))));
+    assert!(!root.path().join("copy/index.html").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn manages_files_and_removes_folders_without_following_links() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

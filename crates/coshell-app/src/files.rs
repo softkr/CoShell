@@ -102,7 +102,7 @@ pub enum FileInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileConfirm {
     Delete { name: String, folder: bool },
-    /// Uploads that would replace files already in the folder.
+    /// Uploads that would replace files already in the folder (or merge into a folder there).
     Overwrite(Vec<PathBuf>),
 }
 
@@ -337,14 +337,18 @@ impl CoShell {
         f.transfers.push(Transfer { id: tid, name, upload, progress: progress.clone(), state: TransferState::Running, after });
         Task::perform(
             async move {
-                let r = if upload { sftp.upload(&local, &remote, &progress).await } else { sftp.download(&remote, &local, &progress).await };
+                let r = match upload {
+                    true if local.is_dir() => sftp.upload_dir(&local, &remote, &progress).await,
+                    true => sftp.upload(&local, &remote, &progress).await,
+                    false => sftp.download(&remote, &local, &progress).await,
+                };
                 r.map_err(|e| e.to_string())
             },
             move |r| Message::Files(id, FilesMsg::TransferDone(tid, r)),
         )
     }
 
-    /// Send local files into the folder shown.
+    /// Send local files and folders into the folder shown.
     fn start_uploads(&mut self, id: TabId, paths: Vec<PathBuf>) -> Task<Message> {
         let Some(dir) = self.files_mut(id).map(|f| f.path.clone()) else { return Task::none() };
         let tasks: Vec<_> = paths
@@ -358,7 +362,7 @@ impl CoShell {
         Task::batch(tasks)
     }
 
-    /// Files dropped on the window go to the active tab's folder.
+    /// Files and folders dropped on the window go to the active tab's folder.
     pub(crate) fn drop_file(&mut self, path: PathBuf) -> Task<Message> {
         match self.active.filter(|id| self.tabs.iter().any(|t| t.id == *id && t.files.link == Link::Ready)) {
             Some(id) if self.sidebar_tab == SidebarTab::Files => self.update_files(id, FilesMsg::UploadPicked(vec![path])),
@@ -434,19 +438,12 @@ impl CoShell {
                 );
             }
             FilesMsg::UploadPicked(paths) => {
-                let (files, folders): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| !p.is_dir());
-                let clash = files.iter().any(|p| p.file_name().is_some_and(|n| f.entry(&n.to_string_lossy()).is_some()));
+                // A folder over one already there merges into it, replacing same-named files.
+                let clash = paths.iter().any(|p| p.file_name().is_some_and(|n| f.entry(&n.to_string_lossy()).is_some()));
                 if clash {
-                    f.confirm = Some(FileConfirm::Overwrite(files));
-                } else if !files.is_empty() {
-                    let task = self.start_uploads(id, files);
-                    if !folders.is_empty() {
-                        self.notice = Some(tr("폴더는 아직 올릴 수 없어 파일만 올립니다").into());
-                    }
-                    return task;
-                }
-                if !folders.is_empty() {
-                    self.notice = Some(tr("폴더는 아직 올릴 수 없습니다").into());
+                    f.confirm = Some(FileConfirm::Overwrite(paths));
+                } else if !paths.is_empty() {
+                    return self.start_uploads(id, paths);
                 }
             }
             FilesMsg::Download(name) => {

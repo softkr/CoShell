@@ -122,7 +122,7 @@ fn ready(id: TabId, f: &Files) -> El<'_> {
     if f.entries.is_empty() {
         list = list.push(centered(muted(if f.loading { tr("불러오는 중…") } else { tr("빈 폴더입니다") })));
     } else {
-        list = list.push(container(muted(tr("파일을 끌어다 놓으면 올라갑니다 · 오른쪽 클릭으로 이름 변경·권한·삭제"))).padding([8, 6]));
+        list = list.push(container(muted(tr("파일·폴더를 끌어다 놓으면 올라갑니다 · 오른쪽 클릭으로 이름 변경·권한·삭제"))).padding([8, 6]));
     }
 
     let mut col = column![

@@ -665,6 +665,19 @@ fn file_panel_checks_names_and_asks_before_anything_is_lost() {
     let _ = app.update(Message::Files(id, FilesMsg::ConfirmNo));
     let _ = app.update(Message::Files(id, FilesMsg::UploadPicked(vec!["/tmp/new.txt".into()])));
     assert!(files(&app).confirm.is_none());
+
+    // A folder goes up too; one with the same name as a folder there merges into it, so it asks.
+    let local = tempfile::tempdir().unwrap();
+    let (logs, fresh) = (local.path().join("logs"), local.path().join("fresh"));
+    std::fs::create_dir(&logs).unwrap();
+    std::fs::create_dir(&fresh).unwrap();
+    let _ = app.update(Message::Files(id, FilesMsg::UploadPicked(vec![logs.clone()])));
+    assert_eq!(files(&app).confirm, Some(FileConfirm::Overwrite(vec![logs])));
+    let _ = app.update(Message::Files(id, FilesMsg::ConfirmNo));
+    app.notice = None;
+    let _ = app.update(Message::Files(id, FilesMsg::UploadPicked(vec![fresh])));
+    assert!(files(&app).confirm.is_none());
+    assert!(app.notice.is_none(), "folders are not turned away");
 }
 
 #[test]

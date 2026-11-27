@@ -51,7 +51,7 @@ impl TransferProgress {
     pub fn done(&self) -> u64 {
         self.done.load(Ordering::Relaxed)
     }
-    /// Size of the file being moved (0 until the transfer has looked).
+    /// Bytes to move: the file, or all files of a folder (0 until the transfer has looked).
     pub fn total(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
     }
@@ -158,10 +158,42 @@ impl Sftp {
     /// place at the end, so the file already there survives a failed upload; its
     /// permissions carry over to the new content.
     pub async fn upload(&self, local: &Path, remote: &str, progress: &TransferProgress) -> Result<(), SshError> {
+        let total = tokio::fs::metadata(local).await.map_err(|e| err(&local.display().to_string(), e))?.len();
+        progress.total.store(total, Ordering::Relaxed);
+        self.put(local, remote, progress).await
+    }
+
+    /// Copy the local folder and everything in it to `remote`, merging into a folder
+    /// already there. Each file is sent as [`Self::upload`] sends one; progress counts
+    /// the whole folder. A link to a file sends its content; a link to a folder is
+    /// left out, since it could lead back into the folder and never end.
+    pub async fn upload_dir(&self, local: &Path, remote: &str, progress: &TransferProgress) -> Result<(), SshError> {
+        let (dirs, files) = walk(local, remote).await?;
+        progress.total.store(files.iter().map(|(_, _, size)| size).sum(), Ordering::Relaxed);
+        for dir in &dirs {
+            if progress.is_cancelled() {
+                return Err(SshError::Cancelled(remote.to_string()));
+            }
+            self.ensure_dir(dir).await?;
+        }
+        for (path, to, _) in &files {
+            self.put(path, to, progress).await?;
+        }
+        Ok(())
+    }
+
+    /// A folder at `path`, made unless one is there already.
+    async fn ensure_dir(&self, path: &str) -> Result<(), SshError> {
+        match self.0.metadata(path).await {
+            Ok(m) if m.file_type().is_dir() => Ok(()),
+            _ => self.mkdir(path).await,
+        }
+    }
+
+    /// Send one file's bytes, counted onto `progress` (whose total the caller sets).
+    async fn put(&self, local: &Path, remote: &str, progress: &TransferProgress) -> Result<(), SshError> {
         let shown = local.display().to_string();
         let mut src = tokio::fs::File::open(local).await.map_err(|e| err(&shown, e))?;
-        let total = src.metadata().await.map_err(|e| err(&shown, e))?.len();
-        progress.total.store(total, Ordering::Relaxed);
         let old_mode = self.0.metadata(remote).await.ok().and_then(|m| m.permissions).map(|p| p & MODE_MASK);
         let part = format!("{remote}{PART_SUFFIX}");
         let result = async {
@@ -229,6 +261,34 @@ impl Sftp {
         }
         Ok(())
     }
+}
+
+/// Remote folders to make (parents before children) and files to send
+/// (local path, remote path, size) for the local folder `local` going to `remote`.
+async fn walk(local: &Path, remote: &str) -> Result<(Vec<String>, Vec<(PathBuf, String, u64)>), SshError> {
+    let (mut dirs, mut files) = (Vec::new(), Vec::new());
+    let mut pending = vec![(local.to_path_buf(), remote.to_string())];
+    while let Some((dir, to)) = pending.pop() {
+        let shown = dir.display().to_string();
+        let mut entries = tokio::fs::read_dir(&dir).await.map_err(|e| err(&shown, e))?;
+        while let Some(e) = entries.next_entry().await.map_err(|e| err(&shown, e))? {
+            let path = e.path();
+            let child = join(&to, &e.file_name().to_string_lossy());
+            // The entry itself, not where a link leads.
+            if e.file_type().await.map_err(|e| err(&path.display().to_string(), e))?.is_dir() {
+                pending.push((path, child));
+                continue;
+            }
+            // Followed here: linked folders, broken links and devices are skipped.
+            if let Ok(m) = tokio::fs::metadata(&path).await
+                && m.is_file()
+            {
+                files.push((path, child, m.len()));
+            }
+        }
+        dirs.push(to);
+    }
+    Ok((dirs, files))
 }
 
 fn part_path(local: &Path) -> PathBuf {
