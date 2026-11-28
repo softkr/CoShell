@@ -156,7 +156,8 @@ impl Settings {
 
     /// Parse the typed fields into the profile and re-check it.
     pub fn apply_adv(&mut self) {
-        let parsed = (|| -> Result<(Option<u32>, Option<f32>, Vec<coshell_ai::Header>), String> {
+        type Parsed = (Option<u32>, Option<f32>, Vec<coshell_ai::Header>);
+        let parsed = (|| -> Result<Parsed, String> {
             let num = |v: &str, what: &str| -> Result<_, String> {
                 Ok(match v.trim() {
                     "" => None,

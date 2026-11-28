@@ -187,10 +187,8 @@ pub fn styled_lines(term: &SharedTerm, max_rows: usize) -> Vec<StyledLine> {
             Some(prev) if joining => prev.append(line),
             _ => lines.push(line),
         }
-        if !wraps {
-            if let Some(l) = lines.last_mut() {
-                l.trim_end();
-            }
+        if !wraps && let Some(l) = lines.last_mut() {
+            l.trim_end();
         }
         joining = wraps;
     }

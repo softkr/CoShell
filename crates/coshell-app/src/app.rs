@@ -84,6 +84,7 @@ const WAVE_TICK: Duration = Duration::from_millis(33);
 const CHAT_INTRO: Duration = Duration::from_millis(650);
 const CHAT_OUTRO: Duration = Duration::from_millis(520);
 /// Once the conversation has poured out, its glass comes up over this long.
+#[cfg_attr(test, allow(dead_code))]
 const GLASS_IN: Duration = Duration::from_millis(320);
 /// How quickly the conversation follows a new size (window, side panel, its sides dragged):
 /// the time constant of its glide (s).
@@ -3344,7 +3345,7 @@ impl CoShell {
         if tab.chat.agent_steps() >= AGENT_MAX_STEPS {
             return Task::none();
         }
-        let Some((index, turn)) = tab.chat.turns.iter().enumerate().last().filter(|(_, t)| t.role == Role::Assistant && !t.stopped) else {
+        let Some((index, turn)) = tab.chat.turns.iter().enumerate().next_back().filter(|(_, t)| t.role == Role::Assistant && !t.stopped) else {
             return Task::none();
         };
         let first = assist::segments(&turn.text).into_iter().find_map(|seg| match seg {
